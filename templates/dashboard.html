@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% set title = "文件列表 - 文件管理系统" %}
+{% block content %}
+<section class="layout">
+  <aside class="sidebar">
+    <h2>分类</h2>
+    <a class="category-link {% if not active_category_id %}active{% endif %}" href="/dashboard">全部文件</a>
+    {% for category in categories %}
+      <a class="category-link {% if active_category_id == category.id %}active{% endif %}" href="/dashboard?category_id={{ category.id }}">{{ category.name }}</a>
+    {% endfor %}
+
+    <form method="post" action="/categories" class="compact-form">
+      <label>
+        <span>新增分类</span>
+        <input type="text" name="name" placeholder="例如：合同归档" required>
+      </label>
+      <input type="hidden" name="description" value="">
+      <button type="submit">添加</button>
+    </form>
+  </aside>
+
+  <section class="content">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Documents</p>
+        <h1>文件列表</h1>
+      </div>
+      <form method="get" action="/dashboard" class="search-form">
+        {% if active_category_id %}
+          <input type="hidden" name="category_id" value="{{ active_category_id }}">
+        {% endif %}
+        <input type="search" name="q" value="{{ q }}" placeholder="搜索文件名或标题">
+        <button type="submit">搜索</button>
+      </form>
+    </div>
+
+    <section class="upload-box">
+      <h2>上传文件</h2>
+      <form method="post" action="/documents/upload" enctype="multipart/form-data" class="upload-form">
+        <label>
+          <span>标题</span>
+          <input type="text" name="title" placeholder="不填则使用文件名">
+        </label>
+        <label>
+          <span>分类</span>
+          <select name="category_id">
+            <option value="">未分类</option>
+            {% for category in categories %}
+              <option value="{{ category.id }}">{{ category.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>版本说明</span>
+          <input type="text" name="notes" placeholder="例如：初始上传">
+        </label>
+        <label>
+          <span>文件</span>
+          <input type="file" name="file" required>
+        </label>
+        <button type="submit">上传</button>
+      </form>
+      <p class="hint">单个文件最大 {{ max_upload_mb }} MB。</p>
+    </section>
+
+    <section class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>标题</th>
+            <th>分类</th>
+            <th>当前版本</th>
+            <th>文件名</th>
+            <th>更新时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for document in documents %}
+            <tr>
+              <td><a href="/documents/{{ document.id }}">{{ document.title }}</a></td>
+              <td>{{ document.category_name or "未分类" }}</td>
+              <td>v{{ document.version_number or 0 }}</td>
+              <td>{{ document.original_filename or "-" }}</td>
+              <td>{{ document.updated_at[:19].replace("T", " ") }}</td>
+              <td class="actions">
+                <a href="/documents/{{ document.id }}">详情</a>
+                <a href="/documents/{{ document.id }}/download">下载</a>
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="6" class="empty">暂无文件</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </section>
+</section>
+{% endblock %}
