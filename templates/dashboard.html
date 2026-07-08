@@ -82,10 +82,13 @@
               <td>{{ document.category_name or "未分类" }}</td>
               <td>v{{ document.version_number or 0 }}</td>
               <td>{{ document.original_filename or "-" }}</td>
-              <td>{{ document.updated_at[:19].replace("T", " ") }}</td>
+              <td>{{ (document.current_version_created_at or document.updated_at)[:19].replace("T", " ") }}</td>
               <td class="actions">
-                <a href="/documents/{{ document.id }}">详情</a>
+                <a href="/documents/{{ document.id }}">预览</a>
                 <a href="/documents/{{ document.id }}/download">下载</a>
+                <form method="post" action="/documents/{{ document.id }}/delete" onsubmit="return confirm('确认删除这个文件及其全部历史版本吗？');">
+                  <button type="submit" class="link-button danger-link">删除</button>
+                </form>
               </td>
             </tr>
           {% else %}
