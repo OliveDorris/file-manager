@@ -9,7 +9,10 @@
         <h1>{{ document.title }}</h1>
         <p class="muted">分类：{{ document.category_name or "未分类" }} · 创建人：{{ document.owner_name }}</p>
       </div>
-      <a class="button-link" href="/documents/{{ document.id }}/download">下载当前版本</a>
+      <div class="button-row">
+        <a class="button-link secondary-button" href="/documents/{{ document.id }}/preview">预览当前版本</a>
+        <a class="button-link" href="/documents/{{ document.id }}/download">下载当前版本</a>
+      </div>
     </div>
 
     <section class="upload-box">
