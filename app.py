@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 import secrets
+import shutil
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -27,6 +29,9 @@ MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "100"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
 
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+audit_logger = logging.getLogger("file_manager.audit")
+
 app = FastAPI(title="File Manager System")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
@@ -45,6 +50,24 @@ def get_db() -> sqlite3.Connection:
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row else None
+
+
+def client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def log_audit_action(request: Request, user: dict[str, Any], operation: str, target: str) -> None:
+    audit_logger.info(
+        "user=%s time=%s ip=%s operation=%s target=%s",
+        user.get("username", "unknown"),
+        now_iso(),
+        client_ip(request),
+        operation,
+        target,
+    )
 
 
 def parse_optional_int(value: str | None) -> int | None:
@@ -236,13 +259,17 @@ def login_page(request: Request) -> Response:
 @app.post("/login")
 def login(request: Request, username: str = Form(...), password: str = Form(...)) -> Response:
     with get_db() as conn:
-        user = conn.execute("SELECT id, password_hash FROM users WHERE username = ?", (username.strip(),)).fetchone()
+        user = conn.execute(
+            "SELECT id, username, password_hash FROM users WHERE username = ?",
+            (username.strip(),),
+        ).fetchone()
     if not user or not verify_password(password, user["password_hash"]):
         return templates.TemplateResponse(
             "login.html",
             {"request": request, "error": "用户名或密码不正确"},
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
+    log_audit_action(request, {"username": user["username"]}, "login", "success")
     return login_response(user["id"])
 
 
@@ -275,12 +302,13 @@ def dashboard(
             SELECT
                 d.id, d.title, d.created_at, d.updated_at,
                 c.name AS category_name,
-                v.original_filename, v.size_bytes, v.version_number
+                v.original_filename, v.size_bytes, v.version_number,
+                v.created_at AS current_version_created_at
             FROM documents d
             LEFT JOIN categories c ON c.id = d.category_id
             LEFT JOIN document_versions v ON v.id = d.current_version_id
             {where_clause}
-            ORDER BY d.updated_at DESC
+            ORDER BY v.created_at DESC, d.updated_at DESC
             """,
             params,
         ).fetchall()
@@ -440,6 +468,26 @@ def update_document_metadata(
         )
         conn.commit()
     return RedirectResponse(url=f"/documents/{document_id}", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@app.post("/documents/{document_id}/delete")
+def delete_document(
+    request: Request,
+    document_id: int,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> RedirectResponse:
+    with get_db() as conn:
+        document = get_document_or_404(conn, document_id)
+        document_title = document["title"]
+        conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+        conn.commit()
+
+    document_dir = UPLOAD_DIR / str(document_id)
+    if document_dir.exists():
+        shutil.rmtree(document_dir)
+
+    log_audit_action(request, user, "delete_document", f"document_id={document_id}; title={document_title}")
+    return RedirectResponse(url="/dashboard", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @app.post("/documents/{document_id}/versions")
