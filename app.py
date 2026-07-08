@@ -11,12 +11,24 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
+from repositories.document_repository import (
+    DOCUMENT_PAGE_SIZE,
+    count_documents,
+    get_current_version,
+    get_document_detail,
+    get_version,
+    list_categories,
+    list_document_versions,
+    list_documents,
+)
+from services.preview_service import build_preview_context
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -30,6 +42,7 @@ MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("file_manager")
 audit_logger = logging.getLogger("file_manager.audit")
 
 app = FastAPI(title="File Manager System")
@@ -74,6 +87,18 @@ def parse_optional_int(value: str | None) -> int | None:
     if value is None or value == "":
         return None
     return int(value)
+
+
+def dashboard_url(category_id: int | None, q: str, page: int) -> str:
+    params: list[tuple[str, str]] = []
+    if category_id:
+        params.append(("category_id", str(category_id)))
+    if q.strip():
+        params.append(("q", q.strip()))
+    if page > 1:
+        params.append(("page", str(page)))
+    query = urlencode(params)
+    return f"/dashboard?{query}" if query else "/dashboard"
 
 
 def password_hash(password: str, salt: str | None = None) -> str:
@@ -283,36 +308,29 @@ def dashboard(
     request: Request,
     category_id: int | None = None,
     q: str = "",
+    page: int = 1,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> Response:
-    filters = []
-    params: list[Any] = []
-    if category_id:
-        filters.append("d.category_id = ?")
-        params.append(category_id)
-    if q.strip():
-        filters.append("(d.title LIKE ? OR v.original_filename LIKE ?)")
-        like = f"%{q.strip()}%"
-        params.extend([like, like])
-    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+    cleaned_query = q.strip()
+    requested_page = max(page, 1)
 
     with get_db() as conn:
-        documents = conn.execute(
-            f"""
-            SELECT
-                d.id, d.title, d.created_at, d.updated_at,
-                c.name AS category_name,
-                v.original_filename, v.size_bytes, v.version_number,
-                v.created_at AS current_version_created_at
-            FROM documents d
-            LEFT JOIN categories c ON c.id = d.category_id
-            LEFT JOIN document_versions v ON v.id = d.current_version_id
-            {where_clause}
-            ORDER BY v.created_at DESC, d.updated_at DESC
-            """,
-            params,
-        ).fetchall()
-        categories = conn.execute("SELECT id, name FROM categories ORDER BY name").fetchall()
+        total_count = count_documents(conn, category_id, cleaned_query)
+        total_pages = max(1, (total_count + DOCUMENT_PAGE_SIZE - 1) // DOCUMENT_PAGE_SIZE)
+        current_page = min(requested_page, total_pages)
+        documents = list_documents(conn, category_id, cleaned_query, current_page)
+        categories = list_categories(conn)
+
+    pagination = {
+        "page": current_page,
+        "page_size": DOCUMENT_PAGE_SIZE,
+        "total_count": total_count,
+        "total_pages": total_pages,
+        "previous_url": dashboard_url(category_id, cleaned_query, current_page - 1) if current_page > 1 else "",
+        "next_url": dashboard_url(category_id, cleaned_query, current_page + 1)
+        if current_page < total_pages
+        else "",
+    }
 
     return templates.TemplateResponse(
         "dashboard.html",
@@ -322,7 +340,8 @@ def dashboard(
             "documents": documents,
             "categories": categories,
             "active_category_id": category_id,
-            "q": q,
+            "q": cleaned_query,
+            "pagination": pagination,
             "max_upload_mb": MAX_UPLOAD_MB,
         },
     )
@@ -401,16 +420,7 @@ def upload_document(
 
 
 def get_document_or_404(conn: sqlite3.Connection, document_id: int) -> sqlite3.Row:
-    document = conn.execute(
-        """
-        SELECT d.*, c.name AS category_name, u.username AS owner_name
-        FROM documents d
-        LEFT JOIN categories c ON c.id = d.category_id
-        LEFT JOIN users u ON u.id = d.owner_id
-        WHERE d.id = ?
-        """,
-        (document_id,),
-    ).fetchone()
+    document = get_document_detail(conn, document_id)
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
     return document
@@ -424,17 +434,8 @@ def document_detail(
 ) -> Response:
     with get_db() as conn:
         document = get_document_or_404(conn, document_id)
-        versions = conn.execute(
-            """
-            SELECT v.*, u.username AS uploaded_by_name
-            FROM document_versions v
-            LEFT JOIN users u ON u.id = v.uploaded_by
-            WHERE v.document_id = ?
-            ORDER BY v.version_number DESC
-            """,
-            (document_id,),
-        ).fetchall()
-        categories = conn.execute("SELECT id, name FROM categories ORDER BY name").fetchall()
+        versions = list_document_versions(conn, document_id)
+        categories = list_categories(conn)
 
     return templates.TemplateResponse(
         "document_detail.html",
@@ -447,6 +448,51 @@ def document_detail(
             "max_upload_mb": MAX_UPLOAD_MB,
         },
     )
+
+
+@app.get("/documents/{document_id}/preview")
+def document_preview(
+    request: Request,
+    document_id: int,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> Response:
+    with get_db() as conn:
+        document = get_document_or_404(conn, document_id)
+        version = get_current_version(conn, document_id)
+
+    if not version:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document has no version")
+
+    try:
+        preview = build_preview_context(document_id, version, UPLOAD_DIR)
+    except FileNotFoundError as exc:
+        logger.warning("Stored file is missing for preview: document_id=%s file=%s", document_id, exc)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Stored file is missing") from exc
+
+    return templates.TemplateResponse(
+        "document_preview.html",
+        {
+            "request": request,
+            "user": user,
+            "document": document,
+            "version": version,
+            "preview": preview,
+        },
+    )
+
+
+@app.get("/documents/{document_id}/preview/file")
+def preview_current_version_file(
+    document_id: int,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> FileResponse:
+    del user
+    with get_db() as conn:
+        get_document_or_404(conn, document_id)
+        version = get_current_version(conn, document_id)
+    if not version:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document has no version")
+    return version_row_file_response(document_id, version, "inline")
 
 
 @app.post("/documents/{document_id}/metadata")
@@ -537,27 +583,28 @@ def upload_new_version(
     return RedirectResponse(url=f"/documents/{document_id}", status_code=status.HTTP_303_SEE_OTHER)
 
 
-def version_file_response(conn: sqlite3.Connection, document_id: int, version_id: int) -> FileResponse:
-    get_document_or_404(conn, document_id)
-    version = conn.execute(
-        "SELECT * FROM document_versions WHERE id = ? AND document_id = ?",
-        (version_id, document_id),
-    ).fetchone()
-    if not version:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
+def version_row_file_response(document_id: int, version: sqlite3.Row, disposition: str) -> FileResponse:
     file_path = UPLOAD_DIR / str(document_id) / version["stored_filename"]
     if not file_path.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Stored file is missing")
 
     download_name = version["original_filename"]
     encoded_name = quote(download_name)
-    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"}
+    headers = {"Content-Disposition": f"{disposition}; filename*=UTF-8''{encoded_name}"}
     return FileResponse(
         file_path,
         media_type=version["content_type"] or "application/octet-stream",
         filename=download_name,
         headers=headers,
     )
+
+
+def version_file_response(conn: sqlite3.Connection, document_id: int, version_id: int) -> FileResponse:
+    get_document_or_404(conn, document_id)
+    version = get_version(conn, document_id, version_id)
+    if not version:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
+    return version_row_file_response(document_id, version, "attachment")
 
 
 @app.get("/documents/{document_id}/download")
