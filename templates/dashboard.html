@@ -84,7 +84,7 @@
               <td>{{ document.original_filename or "-" }}</td>
               <td>{{ (document.current_version_created_at or document.updated_at)[:19].replace("T", " ") }}</td>
               <td class="actions">
-                <a href="/documents/{{ document.id }}">预览</a>
+                <a href="/documents/{{ document.id }}/preview">预览</a>
                 <a href="/documents/{{ document.id }}/download">下载</a>
                 <form method="post" action="/documents/{{ document.id }}/delete" onsubmit="return confirm('确认删除这个文件及其全部历史版本吗？');">
                   <button type="submit" class="link-button danger-link">删除</button>
@@ -98,6 +98,22 @@
           {% endfor %}
         </tbody>
       </table>
+      <div class="pagination">
+        <span>共 {{ pagination.total_count }} 条，每页最多 {{ pagination.page_size }} 条</span>
+        <div class="pagination-controls">
+          {% if pagination.previous_url %}
+            <a href="{{ pagination.previous_url }}">上一页</a>
+          {% else %}
+            <span class="disabled">上一页</span>
+          {% endif %}
+          <strong>第 {{ pagination.page }} / {{ pagination.total_pages }} 页</strong>
+          {% if pagination.next_url %}
+            <a href="{{ pagination.next_url }}">下一页</a>
+          {% else %}
+            <span class="disabled">下一页</span>
+          {% endif %}
+        </div>
+      </div>
     </section>
   </section>
 </section>
