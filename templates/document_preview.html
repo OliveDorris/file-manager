@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% set title = document.title ~ " - 文件预览 - 文件管理系统" %}
+{% block content %}
+<section class="preview-layout">
+  <div class="section-head">
+    <div>
+      <p class="eyebrow">Preview</p>
+      <h1>{{ document.title }}</h1>
+      <p class="muted">当前版本：v{{ version.version_number }} · {{ version.original_filename }}</p>
+    </div>
+    <div class="button-row">
+      <a class="button-link secondary-button" href="/documents/{{ document.id }}">版本管理</a>
+      <a class="button-link" href="/documents/{{ document.id }}/download">下载当前版本</a>
+    </div>
+  </div>
+
+  <section class="preview-panel">
+    {% if preview.kind == "pdf" %}
+      <iframe class="preview-frame" src="{{ preview.inline_url }}" title="{{ version.original_filename }}"></iframe>
+    {% elif preview.kind == "image" %}
+      <div class="preview-image-wrap">
+        <img class="preview-image" src="{{ preview.inline_url }}" alt="{{ version.original_filename }}">
+      </div>
+    {% elif preview.kind == "text" %}
+      <pre class="preview-text">{{ preview.text }}</pre>
+      {% if preview.truncated %}
+        <p class="hint preview-hint">文件内容较长，页面仅显示前 200 KB。</p>
+      {% endif %}
+    {% else %}
+      <div class="preview-empty">
+        <h2>暂不支持在线预览</h2>
+        <p>{{ preview.message }}</p>
+        <a class="button-link" href="/documents/{{ document.id }}/download">下载查看</a>
+      </div>
+    {% endif %}
+  </section>
+</section>
+{% endblock %}
