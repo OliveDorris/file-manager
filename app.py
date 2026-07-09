@@ -28,7 +28,21 @@ from repositories.document_repository import (
     list_document_versions,
     list_documents,
 )
+from repositories.user_repository import (
+    count_admin_users,
+    create_user,
+    get_user_by_id,
+    get_user_by_username,
+    list_users,
+    update_user_admin_status,
+    update_user_password,
+)
 from services.preview_service import build_preview_context
+from services.user_service import (
+    validate_admin_status_change,
+    validate_password_pair,
+    validate_username,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -87,6 +101,15 @@ def parse_optional_int(value: str | None) -> int | None:
     if value is None or value == "":
         return None
     return int(value)
+
+
+def is_admin_user(user: dict[str, Any]) -> bool:
+    return bool(user.get("is_admin"))
+
+
+def require_admin_user(user: dict[str, Any]) -> None:
+    if not is_admin_user(user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin permission is required")
 
 
 def dashboard_url(category_id: int | None, q: str, page: int) -> str:
@@ -160,7 +183,12 @@ def get_current_user(request: Request) -> dict[str, Any]:
     if not user_id:
         raise HTTPException(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": "/login"})
     with get_db() as conn:
-        user = row_to_dict(conn.execute("SELECT id, username, created_at FROM users WHERE id = ?", (user_id,)).fetchone())
+        user = row_to_dict(
+            conn.execute(
+                "SELECT id, username, is_admin, created_at FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+        )
     if not user:
         raise HTTPException(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": "/login"})
     return user
@@ -208,6 +236,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
+                is_admin INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
 
@@ -249,14 +278,23 @@ def init_db() -> None:
             """
         )
 
+        user_columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "is_admin" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+
         admin_username = os.getenv("ADMIN_USERNAME", "admin")
         admin_password = os.getenv("ADMIN_PASSWORD", "admin123456")
-        existing_admin = conn.execute("SELECT id FROM users WHERE username = ?", (admin_username,)).fetchone()
+        existing_admin = get_user_by_username(conn, admin_username)
         if not existing_admin:
-            conn.execute(
-                "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-                (admin_username, password_hash(admin_password), now_iso()),
+            create_user(
+                conn,
+                admin_username,
+                password_hash(admin_password),
+                True,
+                now_iso(),
             )
+        elif not existing_admin["is_admin"]:
+            update_user_admin_status(conn, existing_admin["id"], True)
 
         for name in ("合同", "制度", "项目资料", "财务", "其他"):
             conn.execute(
@@ -301,6 +339,152 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
 @app.get("/logout")
 def logout() -> RedirectResponse:
     return logout_response()
+
+
+def account_template(
+    request: Request,
+    user: dict[str, Any],
+    success: str = "",
+    error: str = "",
+    response_status: int = status.HTTP_200_OK,
+) -> Response:
+    managed_users = []
+    if is_admin_user(user):
+        with get_db() as conn:
+            managed_users = list_users(conn)
+    return templates.TemplateResponse(
+        "account.html",
+        {
+            "request": request,
+            "user": user,
+            "managed_users": managed_users,
+            "success": success,
+            "error": error,
+        },
+        status_code=response_status,
+    )
+
+
+@app.get("/account")
+def account_page(
+    request: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> Response:
+    return account_template(request, user)
+
+
+@app.post("/account/password")
+def change_password(
+    request: Request,
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> Response:
+    try:
+        validated_password = validate_password_pair(new_password, confirm_password)
+    except ValueError as exc:
+        return account_template(request, user, error=str(exc), response_status=status.HTTP_400_BAD_REQUEST)
+
+    with get_db() as conn:
+        db_user = get_user_by_id(conn, user["id"])
+        if not db_user or not verify_password(current_password, db_user["password_hash"]):
+            return account_template(
+                request,
+                user,
+                error="当前密码不正确",
+                response_status=status.HTTP_400_BAD_REQUEST,
+            )
+        update_user_password(conn, user["id"], password_hash(validated_password))
+        conn.commit()
+
+    log_audit_action(request, user, "change_password", f"user_id={user['id']}")
+    return account_template(request, user, success="密码已更新")
+
+
+@app.post("/account/users")
+def create_managed_user(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    confirm_password: str = Form(...),
+    is_admin: str = Form("0"),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> Response:
+    require_admin_user(user)
+    try:
+        cleaned_username = validate_username(username)
+        validated_password = validate_password_pair(password, confirm_password)
+    except ValueError as exc:
+        return account_template(request, user, error=str(exc), response_status=status.HTTP_400_BAD_REQUEST)
+
+    new_is_admin = is_admin == "1"
+    with get_db() as conn:
+        if get_user_by_username(conn, cleaned_username):
+            return account_template(
+                request,
+                user,
+                error="用户名已存在",
+                response_status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            new_user_id = create_user(
+                conn,
+                cleaned_username,
+                password_hash(validated_password),
+                new_is_admin,
+                now_iso(),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            logger.warning("Failed to create user: username=%s error=%s", cleaned_username, exc)
+            return account_template(
+                request,
+                user,
+                error="用户名已存在",
+                response_status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    log_audit_action(
+        request,
+        user,
+        "create_user",
+        f"user_id={new_user_id}; username={cleaned_username}; is_admin={int(new_is_admin)}",
+    )
+    return account_template(request, user, success="用户已新增")
+
+
+@app.post("/account/users/{target_user_id}/admin")
+def update_managed_user_admin(
+    request: Request,
+    target_user_id: int,
+    is_admin: str = Form("0"),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> Response:
+    require_admin_user(user)
+    new_is_admin = is_admin == "1"
+
+    with get_db() as conn:
+        target_user = get_user_by_id(conn, target_user_id)
+        if not target_user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        try:
+            validate_admin_status_change(target_user, new_is_admin, count_admin_users(conn))
+        except ValueError as exc:
+            return account_template(request, user, error=str(exc), response_status=status.HTTP_400_BAD_REQUEST)
+        update_user_admin_status(conn, target_user_id, new_is_admin)
+        conn.commit()
+
+    log_audit_action(
+        request,
+        user,
+        "update_user_permission",
+        f"user_id={target_user_id}; is_admin={int(new_is_admin)}",
+    )
+    response_user = dict(user)
+    if target_user_id == user["id"]:
+        response_user["is_admin"] = int(new_is_admin)
+    return account_template(request, response_user, success="权限已更新")
 
 
 @app.get("/dashboard")
