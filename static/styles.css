@@ -11,6 +11,7 @@
   --accent: #2f8f4e;
   --accent-dark: #24723e;
   --accent-soft: #dff0df;
+  --hover-soft: #edf0ed;
   --sky: #dbeeea;
   --danger: #b42318;
 }
@@ -56,7 +57,7 @@ a:hover {
 .brand {
   font-weight: 700;
   color: var(--text);
-  font-size: 18px;
+  font-size: 28px;
   white-space: nowrap;
 }
 
@@ -71,6 +72,15 @@ a:hover {
 .nav a,
 .nav span {
   white-space: nowrap;
+}
+
+.user-link {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.user-link:hover {
+  color: var(--accent-dark);
 }
 
 .page {
@@ -103,7 +113,8 @@ a:hover {
 .sidebar,
 .side-panel,
 .upload-box,
-.table-wrap {
+.table-wrap,
+.panel-box {
   background: rgba(255, 254, 249, 0.97);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -112,14 +123,16 @@ a:hover {
 
 .sidebar,
 .side-panel,
-.upload-box {
+.upload-box,
+.panel-box {
   padding: 20px;
 }
 
 .sidebar h2,
 .side-panel h2,
 .upload-box h2,
-.table-wrap h2 {
+.table-wrap h2,
+.panel-box h2 {
   margin: 0 0 16px;
   font-size: 17px;
   white-space: nowrap;
@@ -135,10 +148,15 @@ a:hover {
   text-overflow: ellipsis;
 }
 
-.category-link.active,
-.category-link:hover {
+.category-link.active {
   background: var(--accent-soft);
   color: var(--accent-dark);
+  text-decoration: none;
+}
+
+.category-link:not(.active):hover {
+  background: var(--hover-soft);
+  color: var(--text);
   text-decoration: none;
 }
 
@@ -167,7 +185,7 @@ a:hover {
 
 h1 {
   margin: 0;
-  font-size: 28px;
+  font-size: 18px;
   line-height: 1.2;
 }
 
@@ -188,6 +206,12 @@ h1 {
   color: var(--danger);
   border-radius: 6px;
   margin-bottom: 16px;
+}
+
+.success-alert {
+  background: #f0f8ed;
+  border-color: var(--line-strong);
+  color: var(--accent-dark);
 }
 
 form {
@@ -215,7 +239,21 @@ form {
 }
 
 .search-form {
-  grid-template-columns: minmax(220px, 1fr) auto;
+  width: min(540px, 34%);
+  min-width: 360px;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  justify-self: end;
+}
+
+.search-button {
+  width: 42px;
+  min-width: 42px;
+  padding: 0;
+  font-size: 17px;
+}
+
+.search-button span {
+  line-height: 1;
 }
 
 label {
@@ -559,6 +597,39 @@ td:last-child {
   margin: 0;
 }
 
+.account-layout {
+  display: grid;
+  gap: 18px;
+}
+
+.account-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  align-items: start;
+}
+
+.account-table h2 {
+  padding: 20px 20px 0;
+}
+
+.inline-form {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inline-form select {
+  width: auto;
+  min-width: 120px;
+}
+
+.small-button {
+  height: 36px;
+  min-width: 64px;
+  padding: 0 12px;
+}
+
 @media (max-width: 900px) {
   .layout,
   .detail-layout {
@@ -569,6 +640,11 @@ td:last-child {
   .upload-form,
   .search-form {
     grid-template-columns: 1fr;
+  }
+
+  .search-form {
+    width: 100%;
+    min-width: 0;
   }
 
   .section-head {
@@ -594,8 +670,22 @@ td:last-child {
     flex-direction: column;
   }
 
+  .account-grid {
+    grid-template-columns: 1fr;
+  }
+
   .pagination-controls {
     justify-content: space-between;
+  }
+
+  .inline-form {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .inline-form select {
+    width: 100%;
   }
 }
 
