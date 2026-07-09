@@ -3,9 +3,23 @@ from __future__ import annotations
 import sqlite3
 
 
-def list_users(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+USER_PAGE_SIZE = 10
+
+
+def count_users(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT COUNT(*) AS total FROM users").fetchone()
+    return int(row["total"])
+
+
+def list_users(
+    conn: sqlite3.Connection,
+    page: int = 1,
+    page_size: int = USER_PAGE_SIZE,
+) -> list[sqlite3.Row]:
+    offset = (max(page, 1) - 1) * page_size
     return conn.execute(
-        "SELECT id, username, is_admin, created_at FROM users ORDER BY id"
+        "SELECT id, username, is_admin, created_at FROM users ORDER BY id LIMIT ? OFFSET ?",
+        (page_size, offset),
     ).fetchall()
 
 
