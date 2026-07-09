@@ -25,6 +25,10 @@ def document_filter_clause(category_id: int | None, q: str) -> tuple[str, list[A
     return where_clause, params
 
 
+def id_placeholders(values: list[int]) -> str:
+    return ",".join("?" for _ in values)
+
+
 def count_documents(conn: sqlite3.Connection, category_id: int | None, q: str) -> int:
     where_clause, params = document_filter_clause(category_id, q)
     row = conn.execute(
@@ -64,6 +68,50 @@ def list_documents(
         """,
         [*params, page_size, offset],
     ).fetchall()
+
+
+def list_documents_by_ids(conn: sqlite3.Connection, document_ids: list[int]) -> list[sqlite3.Row]:
+    if not document_ids:
+        return []
+    return conn.execute(
+        f"""
+        SELECT id, title
+        FROM documents
+        WHERE id IN ({id_placeholders(document_ids)})
+        ORDER BY id
+        """,
+        document_ids,
+    ).fetchall()
+
+
+def list_current_versions_for_documents(
+    conn: sqlite3.Connection,
+    document_ids: list[int],
+) -> list[sqlite3.Row]:
+    if not document_ids:
+        return []
+    return conn.execute(
+        f"""
+        SELECT
+            d.id, d.title,
+            v.original_filename, v.stored_filename, v.content_type
+        FROM documents d
+        JOIN document_versions v ON v.id = d.current_version_id
+        WHERE d.id IN ({id_placeholders(document_ids)})
+        ORDER BY d.id
+        """,
+        document_ids,
+    ).fetchall()
+
+
+def delete_documents_by_ids(conn: sqlite3.Connection, document_ids: list[int]) -> int:
+    if not document_ids:
+        return 0
+    cursor = conn.execute(
+        f"DELETE FROM documents WHERE id IN ({id_placeholders(document_ids)})",
+        document_ids,
+    )
+    return int(cursor.rowcount)
 
 
 def list_categories(conn: sqlite3.Connection) -> list[sqlite3.Row]:
