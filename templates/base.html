@@ -11,7 +11,7 @@
     <a class="brand" href="/dashboard">文件管理系统</a>
     {% if user %}
       <nav class="nav">
-        <span>{{ user.username }}</span>
+        <a class="user-link" href="/account">{{ user.username }}</a>
         <a href="/logout">退出</a>
       </nav>
     {% endif %}
