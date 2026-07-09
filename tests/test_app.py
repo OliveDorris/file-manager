@@ -1,3 +1,6 @@
+from io import BytesIO
+import zipfile
+
 from fastapi.testclient import TestClient
 
 import app
@@ -19,6 +22,45 @@ def authenticated_client(user_id: int) -> TestClient:
     client = TestClient(app.app)
     client.cookies.set(app.SESSION_COOKIE, app.sign_value(str(user_id)))
     return client
+
+
+def insert_document(
+    title: str,
+    user_id: int,
+    category_id: int | None = None,
+    filename: str = "sample.txt",
+    content: str = "sample",
+) -> int:
+    created_at = app.now_iso()
+    with app.get_db() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO documents (title, category_id, owner_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (title, category_id, user_id, created_at, created_at),
+        )
+        document_id = cursor.lastrowid
+        document_dir = app.UPLOAD_DIR / str(document_id)
+        document_dir.mkdir(parents=True)
+        stored_filename = filename
+        (document_dir / stored_filename).write_text(content, encoding="utf-8")
+        version_cursor = conn.execute(
+            """
+            INSERT INTO document_versions (
+                document_id, version_number, original_filename, stored_filename,
+                content_type, size_bytes, notes, uploaded_by, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (document_id, 1, filename, stored_filename, "text/plain", len(content), "", user_id, created_at),
+        )
+        conn.execute(
+            "UPDATE documents SET current_version_id = ? WHERE id = ?",
+            (version_cursor.lastrowid, document_id),
+        )
+        conn.commit()
+    return int(document_id)
 
 
 def test_login_page_loads(tmp_path, monkeypatch):
@@ -76,6 +118,124 @@ def test_delete_document_removes_database_rows_and_files(tmp_path, monkeypatch):
 
     assert document_count == 0
     assert version_count == 0
+
+
+def test_category_delete_is_blocked_when_category_has_documents(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    user = admin_user()
+
+    with app.get_db() as conn:
+        category_id = conn.execute(
+            "INSERT INTO categories (name, description, created_at) VALUES (?, '', ?)",
+            ("AI技巧", app.now_iso()),
+        ).lastrowid
+        conn.commit()
+
+    insert_document("Category sample", user["id"], category_id=category_id)
+    client = authenticated_client(user["id"])
+    response = client.post(
+        f"/categories/{category_id}/delete",
+        data={"active_category_id": str(category_id), "q": "", "page": "1"},
+    )
+
+    assert response.status_code == 200
+    assert "文件夹中有文件，请清空后再删除文件夹。" in response.text
+
+    with app.get_db() as conn:
+        category_count = conn.execute(
+            "SELECT COUNT(*) FROM categories WHERE id = ?",
+            (category_id,),
+        ).fetchone()[0]
+
+    assert category_count == 1
+
+
+def test_empty_category_can_be_deleted(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    user = admin_user()
+
+    with app.get_db() as conn:
+        category_id = conn.execute(
+            "INSERT INTO categories (name, description, created_at) VALUES (?, '', ?)",
+            ("空文件夹", app.now_iso()),
+        ).lastrowid
+        conn.commit()
+
+    client = authenticated_client(user["id"])
+    response = client.post(
+        f"/categories/{category_id}/delete",
+        data={"active_category_id": "", "q": "", "page": "1"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+
+    with app.get_db() as conn:
+        category_count = conn.execute(
+            "SELECT COUNT(*) FROM categories WHERE id = ?",
+            (category_id,),
+        ).fetchone()[0]
+
+    assert category_count == 0
+
+
+def test_batch_delete_removes_selected_documents_and_files(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    user = admin_user()
+    first_id = insert_document("First", user["id"], filename="first.txt")
+    second_id = insert_document("Second", user["id"], filename="second.txt")
+    third_id = insert_document("Third", user["id"], filename="third.txt")
+
+    client = authenticated_client(user["id"])
+    response = client.post(
+        "/documents/batch-delete",
+        data={
+            "document_ids": [str(first_id), str(second_id)],
+            "active_category_id": "",
+            "q": "",
+            "page": "1",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert not (app.UPLOAD_DIR / str(first_id)).exists()
+    assert not (app.UPLOAD_DIR / str(second_id)).exists()
+    assert (app.UPLOAD_DIR / str(third_id)).exists()
+
+    with app.get_db() as conn:
+        remaining_ids = {
+            row["id"]
+            for row in conn.execute("SELECT id FROM documents ORDER BY id").fetchall()
+        }
+
+    assert remaining_ids == {third_id}
+
+
+def test_batch_download_returns_zip_for_selected_documents(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    user = admin_user()
+    first_id = insert_document("First", user["id"], filename="first.txt", content="first")
+    second_id = insert_document("Second", user["id"], filename="second.txt", content="second")
+
+    client = authenticated_client(user["id"])
+    response = client.post(
+        "/documents/batch-download",
+        data={
+            "document_ids": [str(first_id), str(second_id)],
+            "active_category_id": "",
+            "q": "",
+            "page": "1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/zip")
+
+    with zipfile.ZipFile(BytesIO(response.content)) as archive:
+        assert sorted(archive.namelist()) == ["first.txt", "second.txt"]
+        assert archive.read("first.txt") == b"first"
+        assert archive.read("second.txt") == b"second"
 
 
 def test_dashboard_paginates_documents_to_ten_per_page(tmp_path, monkeypatch):
@@ -223,6 +383,37 @@ def test_admin_user_can_manage_account_users(tmp_path, monkeypatch):
         managed_user = conn.execute("SELECT is_admin FROM users WHERE username = ?", ("manager",)).fetchone()
 
     assert managed_user["is_admin"] == 1
+
+
+def test_admin_user_list_paginates_to_ten_users(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    user = admin_user()
+
+    with app.get_db() as conn:
+        for index in range(12):
+            app.create_user(
+                conn,
+                f"user-{index:02d}",
+                app.password_hash("Password123"),
+                False,
+                app.now_iso(),
+            )
+        conn.commit()
+
+    client = authenticated_client(user["id"])
+    first_page = client.get("/account")
+    second_page = client.get("/account?user_page=2")
+
+    assert first_page.status_code == 200
+    assert "共 13 个用户，每页最多 10 个" in first_page.text
+    assert "第 1 / 2 页" in first_page.text
+    assert "user-00" in first_page.text
+    assert "user-09" not in first_page.text
+
+    assert second_page.status_code == 200
+    assert "第 2 / 2 页" in second_page.text
+    assert "user-09" in second_page.text
+    assert "user-11" in second_page.text
 
 
 def test_last_admin_cannot_be_downgraded(tmp_path, monkeypatch):

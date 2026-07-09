@@ -18,54 +18,71 @@
     <div class="alert success-alert">{{ success }}</div>
   {% endif %}
 
-  <section class="account-grid">
-    <section class="panel-box">
-      <h2>修改密码</h2>
-      <form method="post" action="/account/password" class="form-stack">
-        <label>
-          <span>当前密码</span>
-          <input type="password" name="current_password" required>
-        </label>
-        <label>
-          <span>新密码</span>
-          <input type="password" name="new_password" minlength="8" required>
-        </label>
-        <label>
-          <span>确认新密码</span>
-          <input type="password" name="confirm_password" minlength="8" required>
-        </label>
-        <button type="submit">保存密码</button>
-      </form>
-    </section>
-
+  <section class="account-action-list">
+    <button type="button" class="action-line-button" data-dialog-open="password-dialog">修改密码</button>
     {% if user.is_admin %}
-      <section class="panel-box">
-        <h2>新增用户</h2>
-        <form method="post" action="/account/users" class="form-stack">
-          <label>
-            <span>用户名</span>
-            <input type="text" name="username" maxlength="50" required>
-          </label>
-          <label>
-            <span>初始密码</span>
-            <input type="password" name="password" minlength="8" required>
-          </label>
-          <label>
-            <span>确认初始密码</span>
-            <input type="password" name="confirm_password" minlength="8" required>
-          </label>
-          <label>
-            <span>权限</span>
-            <select name="is_admin">
-              <option value="0">普通用户</option>
-              <option value="1">管理员</option>
-            </select>
-          </label>
-          <button type="submit">新增用户</button>
-        </form>
-      </section>
+      <button type="button" class="action-line-button" data-dialog-open="create-user-dialog">新增用户</button>
     {% endif %}
   </section>
+
+  <dialog class="modal-dialog" id="password-dialog">
+    <form method="post" action="/account/password" class="form-stack modal-form">
+      <div class="modal-head">
+        <h2>修改密码</h2>
+        <button type="button" class="modal-close-button" data-dialog-close aria-label="关闭">×</button>
+      </div>
+      <label>
+        <span>当前密码</span>
+        <input type="password" name="current_password" required>
+      </label>
+      <label>
+        <span>新密码</span>
+        <input type="password" name="new_password" minlength="8" required>
+      </label>
+      <label>
+        <span>确认新密码</span>
+        <input type="password" name="confirm_password" minlength="8" required>
+      </label>
+      <div class="button-row">
+        <button type="button" class="secondary-button" data-dialog-close>取消</button>
+        <button type="submit">保存密码</button>
+      </div>
+    </form>
+  </dialog>
+
+  {% if user.is_admin %}
+    <dialog class="modal-dialog" id="create-user-dialog">
+      <form method="post" action="/account/users" class="form-stack modal-form">
+        <div class="modal-head">
+          <h2>新增用户</h2>
+          <button type="button" class="modal-close-button" data-dialog-close aria-label="关闭">×</button>
+        </div>
+        <label>
+          <span>用户名</span>
+          <input type="text" name="username" maxlength="50" required>
+        </label>
+        <label>
+          <span>初始密码</span>
+          <input type="password" name="password" minlength="8" required>
+        </label>
+        <label>
+          <span>确认初始密码</span>
+          <input type="password" name="confirm_password" minlength="8" required>
+        </label>
+        <label>
+          <span>权限</span>
+          <select name="is_admin">
+            <option value="0">普通用户</option>
+            <option value="1">管理员</option>
+          </select>
+        </label>
+        <div class="button-row">
+          <button type="button" class="secondary-button" data-dialog-close>取消</button>
+          <button type="submit">新增用户</button>
+        </div>
+      </form>
+    </dialog>
+  {% endif %}
 
   {% if user.is_admin %}
     <section class="table-wrap account-table">
@@ -87,6 +104,7 @@
               <td>{{ managed_user.created_at[:19].replace("T", " ") }}</td>
               <td class="actions">
                 <form method="post" action="/account/users/{{ managed_user.id }}/admin" class="inline-form">
+                  <input type="hidden" name="user_page" value="{{ user_pagination.page }}">
                   <select name="is_admin" aria-label="权限">
                     <option value="0" {% if not managed_user.is_admin %}selected{% endif %}>普通用户</option>
                     <option value="1" {% if managed_user.is_admin %}selected{% endif %}>管理员</option>
@@ -95,10 +113,67 @@
                 </form>
               </td>
             </tr>
+          {% else %}
+            <tr>
+              <td colspan="4" class="empty">暂无用户</td>
+            </tr>
           {% endfor %}
         </tbody>
       </table>
+      <div class="pagination">
+        <span>共 {{ user_pagination.total_count }} 个用户，每页最多 {{ user_pagination.page_size }} 个</span>
+        <div class="pagination-controls">
+          {% if user_pagination.previous_url %}
+            <a href="{{ user_pagination.previous_url }}">上一页</a>
+          {% else %}
+            <span class="disabled">上一页</span>
+          {% endif %}
+          <strong>第 {{ user_pagination.page }} / {{ user_pagination.total_pages }} 页</strong>
+          {% if user_pagination.next_url %}
+            <a href="{{ user_pagination.next_url }}">下一页</a>
+          {% else %}
+            <span class="disabled">下一页</span>
+          {% endif %}
+        </div>
+      </div>
     </section>
   {% endif %}
 </section>
+
+<script>
+(() => {
+  document.querySelectorAll("[data-dialog-open]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const dialog = document.getElementById(button.dataset.dialogOpen);
+      if (!dialog) return;
+      if (typeof dialog.showModal === "function") {
+        dialog.showModal();
+      } else {
+        dialog.setAttribute("open", "open");
+      }
+    });
+  });
+
+  document.querySelectorAll(".modal-dialog").forEach((dialog) => {
+    dialog.addEventListener("click", (event) => {
+      if (event.target === dialog) {
+        if (typeof dialog.close === "function") {
+          dialog.close();
+        } else {
+          dialog.removeAttribute("open");
+        }
+      }
+    });
+    dialog.querySelectorAll("[data-dialog-close]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (typeof dialog.close === "function") {
+          dialog.close();
+        } else {
+          dialog.removeAttribute("open");
+        }
+      });
+    });
+  });
+})();
+</script>
 {% endblock %}

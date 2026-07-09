@@ -5,7 +5,6 @@ import hmac
 import logging
 import os
 import secrets
-import shutil
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -17,25 +16,44 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.background import BackgroundTask
 
+from repositories.category_repository import (
+    count_documents_in_category,
+    create_category as create_category_record,
+    delete_category as delete_category_record,
+    get_category,
+)
 from repositories.document_repository import (
     DOCUMENT_PAGE_SIZE,
     count_documents,
+    delete_documents_by_ids,
     get_current_version,
     get_document_detail,
     get_version,
     list_categories,
+    list_current_versions_for_documents,
     list_document_versions,
+    list_documents_by_ids,
     list_documents,
 )
 from repositories.user_repository import (
+    USER_PAGE_SIZE,
     count_admin_users,
+    count_users,
     create_user,
     get_user_by_id,
     get_user_by_username,
     list_users,
     update_user_admin_status,
     update_user_password,
+)
+from services.category_service import validate_category_can_delete
+from services.document_service import (
+    build_batch_download_zip,
+    parse_selected_document_ids,
+    remove_document_files,
+    remove_many_document_files,
 )
 from services.preview_service import build_preview_context
 from services.user_service import (
@@ -103,6 +121,13 @@ def parse_optional_int(value: str | None) -> int | None:
     return int(value)
 
 
+def parse_page(value: object, default: int = 1) -> int:
+    try:
+        return max(int(str(value)), 1)
+    except (TypeError, ValueError):
+        return default
+
+
 def is_admin_user(user: dict[str, Any]) -> bool:
     return bool(user.get("is_admin"))
 
@@ -112,7 +137,13 @@ def require_admin_user(user: dict[str, Any]) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin permission is required")
 
 
-def dashboard_url(category_id: int | None, q: str, page: int) -> str:
+def dashboard_url(
+    category_id: int | None,
+    q: str,
+    page: int,
+    success: str = "",
+    error: str = "",
+) -> str:
     params: list[tuple[str, str]] = []
     if category_id:
         params.append(("category_id", str(category_id)))
@@ -120,8 +151,28 @@ def dashboard_url(category_id: int | None, q: str, page: int) -> str:
         params.append(("q", q.strip()))
     if page > 1:
         params.append(("page", str(page)))
+    if success:
+        params.append(("success", success))
+    if error:
+        params.append(("error", error))
     query = urlencode(params)
     return f"/dashboard?{query}" if query else "/dashboard"
+
+
+def account_url(user_page: int) -> str:
+    if user_page > 1:
+        return f"/account?user_page={user_page}"
+    return "/account"
+
+
+def dashboard_url_from_form(form: Any, success: str = "", error: str = "") -> str:
+    return dashboard_url(
+        parse_optional_int(str(form.get("active_category_id") or "")),
+        str(form.get("q") or ""),
+        parse_page(form.get("page")),
+        success=success,
+        error=error,
+    )
 
 
 def password_hash(password: str, salt: str | None = None) -> str:
@@ -347,17 +398,31 @@ def account_template(
     success: str = "",
     error: str = "",
     response_status: int = status.HTTP_200_OK,
+    user_page: int = 1,
 ) -> Response:
     managed_users = []
+    user_pagination: dict[str, Any] = {}
     if is_admin_user(user):
         with get_db() as conn:
-            managed_users = list_users(conn)
+            total_count = count_users(conn)
+            total_pages = max(1, (total_count + USER_PAGE_SIZE - 1) // USER_PAGE_SIZE)
+            current_page = min(max(user_page, 1), total_pages)
+            managed_users = list_users(conn, current_page)
+        user_pagination = {
+            "page": current_page,
+            "page_size": USER_PAGE_SIZE,
+            "total_count": total_count,
+            "total_pages": total_pages,
+            "previous_url": account_url(current_page - 1) if current_page > 1 else "",
+            "next_url": account_url(current_page + 1) if current_page < total_pages else "",
+        }
     return templates.TemplateResponse(
         "account.html",
         {
             "request": request,
             "user": user,
             "managed_users": managed_users,
+            "user_pagination": user_pagination,
             "success": success,
             "error": error,
         },
@@ -368,9 +433,10 @@ def account_template(
 @app.get("/account")
 def account_page(
     request: Request,
+    user_page: int = 1,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> Response:
-    return account_template(request, user)
+    return account_template(request, user, user_page=user_page)
 
 
 @app.post("/account/password")
@@ -459,6 +525,7 @@ def update_managed_user_admin(
     request: Request,
     target_user_id: int,
     is_admin: str = Form("0"),
+    user_page: int = Form(1),
     user: dict[str, Any] = Depends(get_current_user),
 ) -> Response:
     require_admin_user(user)
@@ -471,7 +538,13 @@ def update_managed_user_admin(
         try:
             validate_admin_status_change(target_user, new_is_admin, count_admin_users(conn))
         except ValueError as exc:
-            return account_template(request, user, error=str(exc), response_status=status.HTTP_400_BAD_REQUEST)
+            return account_template(
+                request,
+                user,
+                error=str(exc),
+                response_status=status.HTTP_400_BAD_REQUEST,
+                user_page=user_page,
+            )
         update_user_admin_status(conn, target_user_id, new_is_admin)
         conn.commit()
 
@@ -484,7 +557,7 @@ def update_managed_user_admin(
     response_user = dict(user)
     if target_user_id == user["id"]:
         response_user["is_admin"] = int(new_is_admin)
-    return account_template(request, response_user, success="权限已更新")
+    return account_template(request, response_user, success="权限已更新", user_page=user_page)
 
 
 @app.get("/dashboard")
@@ -493,6 +566,8 @@ def dashboard(
     category_id: int | None = None,
     q: str = "",
     page: int = 1,
+    success: str = "",
+    error: str = "",
     user: dict[str, Any] = Depends(get_current_user),
 ) -> Response:
     cleaned_query = q.strip()
@@ -527,6 +602,8 @@ def dashboard(
             "q": cleaned_query,
             "pagination": pagination,
             "max_upload_mb": MAX_UPLOAD_MB,
+            "success": success,
+            "error": error,
         },
     )
 
@@ -542,12 +619,46 @@ def create_category(
     if not cleaned_name:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Category name is required")
     with get_db() as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO categories (name, description, created_at) VALUES (?, ?, ?)",
-            (cleaned_name, description.strip(), now_iso()),
-        )
+        create_category_record(conn, cleaned_name, description.strip(), now_iso())
         conn.commit()
     return RedirectResponse(url="/dashboard", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@app.post("/categories/{category_id}/delete")
+def delete_category(
+    request: Request,
+    category_id: int,
+    active_category_id: str = Form(""),
+    q: str = Form(""),
+    page: int = Form(1),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> RedirectResponse:
+    return_category_id = parse_optional_int(active_category_id)
+    return_page = parse_page(page)
+
+    with get_db() as conn:
+        category = get_category(conn, category_id)
+        if not category:
+            return RedirectResponse(
+                url=dashboard_url(return_category_id, q, return_page, error="文件夹不存在"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        try:
+            validate_category_can_delete(count_documents_in_category(conn, category_id))
+        except ValueError as exc:
+            return RedirectResponse(
+                url=dashboard_url(return_category_id, q, return_page, error=str(exc)),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        delete_category_record(conn, category_id)
+        conn.commit()
+
+    next_category_id = None if return_category_id == category_id else return_category_id
+    log_audit_action(request, user, "delete_category", f"category_id={category_id}; name={category['name']}")
+    return RedirectResponse(
+        url=dashboard_url(next_category_id, q, return_page, success="文件夹已删除"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @app.post("/documents/upload")
@@ -601,6 +712,85 @@ def upload_document(
         conn.commit()
 
     return RedirectResponse(url=f"/documents/{document_id}", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@app.post("/documents/batch-download")
+async def batch_download_documents(
+    request: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> Response:
+    del user
+    form = await request.form()
+    try:
+        document_ids = parse_selected_document_ids(form.getlist("document_ids"))
+    except ValueError as exc:
+        return RedirectResponse(
+            url=dashboard_url_from_form(form, error=str(exc)),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    with get_db() as conn:
+        documents = list_current_versions_for_documents(conn, document_ids)
+
+    try:
+        zip_path, download_name = build_batch_download_zip(documents, UPLOAD_DIR, DATA_DIR / "tmp")
+    except ValueError as exc:
+        return RedirectResponse(
+            url=dashboard_url_from_form(form, error=str(exc)),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    except FileNotFoundError as exc:
+        logger.warning("Stored file is missing for batch download: file=%s", exc)
+        return RedirectResponse(
+            url=dashboard_url_from_form(form, error="选中文件中有文件不存在，请检查后再试。"),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    encoded_name = quote(download_name)
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename=download_name,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
+        background=BackgroundTask(lambda path: Path(path).unlink(missing_ok=True), str(zip_path)),
+    )
+
+
+@app.post("/documents/batch-delete")
+async def batch_delete_documents(
+    request: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> RedirectResponse:
+    form = await request.form()
+    try:
+        document_ids = parse_selected_document_ids(form.getlist("document_ids"))
+    except ValueError as exc:
+        return RedirectResponse(
+            url=dashboard_url_from_form(form, error=str(exc)),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    with get_db() as conn:
+        documents = list_documents_by_ids(conn, document_ids)
+        if not documents:
+            return RedirectResponse(
+                url=dashboard_url_from_form(form, error="请选择有效文件"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        deleted_count = delete_documents_by_ids(conn, [document["id"] for document in documents])
+        conn.commit()
+
+    remove_many_document_files(UPLOAD_DIR, [document["id"] for document in documents])
+    log_audit_action(
+        request,
+        user,
+        "batch_delete_documents",
+        f"document_ids={','.join(str(document['id']) for document in documents)}; count={deleted_count}",
+    )
+    return RedirectResponse(
+        url=dashboard_url_from_form(form, success=f"已删除 {deleted_count} 个文件"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 def get_document_or_404(conn: sqlite3.Connection, document_id: int) -> sqlite3.Row:
@@ -712,10 +902,7 @@ def delete_document(
         conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
         conn.commit()
 
-    document_dir = UPLOAD_DIR / str(document_id)
-    if document_dir.exists():
-        shutil.rmtree(document_dir)
-
+    remove_document_files(UPLOAD_DIR, document_id)
     log_audit_action(request, user, "delete_document", f"document_id={document_id}; title={document_title}")
     return RedirectResponse(url="/dashboard", status_code=status.HTTP_303_SEE_OTHER)
 

@@ -14,6 +14,8 @@
   --hover-soft: #edf0ed;
   --sky: #dbeeea;
   --danger: #b42318;
+  --danger-soft: #fff1f0;
+  --disabled-bg: #edf1ed;
 }
 
 * {
@@ -138,8 +140,21 @@ a:hover {
   white-space: nowrap;
 }
 
+.category-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  border-radius: 6px;
+}
+
+.category-row + .category-row {
+  margin-top: 2px;
+}
+
 .category-link {
   display: block;
+  flex: 1;
+  min-width: 0;
   padding: 10px 12px;
   border-radius: 6px;
   color: var(--text);
@@ -148,16 +163,57 @@ a:hover {
   text-overflow: ellipsis;
 }
 
+.category-row .category-link {
+  padding-right: 38px;
+}
+
 .category-link.active {
   background: var(--accent-soft);
   color: var(--accent-dark);
   text-decoration: none;
 }
 
-.category-link:not(.active):hover {
+.category-row:hover .category-link:not(.active) {
   background: var(--hover-soft);
   color: var(--text);
   text-decoration: none;
+}
+
+.category-delete-form {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+  transition: opacity 0.16s ease;
+}
+
+.category-row:hover .category-delete-form,
+.category-row:focus-within .category-delete-form,
+.category-row.is-active .category-delete-form {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.category-menu-button {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  padding: 0 0 2px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.52);
+  color: var(--muted);
+  font-size: 15px;
+  letter-spacing: 0;
+  line-height: 1;
+}
+
+.category-menu-button:hover {
+  background: #fff;
+  border-color: var(--line-strong);
+  color: var(--danger);
 }
 
 .content,
@@ -241,18 +297,40 @@ form {
 .search-form {
   width: min(540px, 34%);
   min-width: 360px;
-  grid-template-columns: minmax(0, 1fr) 42px;
+  grid-template-columns: minmax(0, 1fr);
   justify-self: end;
 }
 
-.search-button {
-  width: 42px;
-  min-width: 42px;
-  padding: 0;
-  font-size: 17px;
+.search-field {
+  position: relative;
 }
 
-.search-button span {
+.search-field input {
+  padding-right: 52px;
+}
+
+.search-inline-button {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #edf6ea;
+  color: var(--accent-dark);
+  font-size: 15px;
+  transform: translateY(-50%);
+}
+
+.search-inline-button:hover {
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+}
+
+.search-inline-button span {
   line-height: 1;
 }
 
@@ -278,6 +356,13 @@ select {
   color: var(--text);
   padding: 0 12px;
   font: inherit;
+}
+
+input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  accent-color: var(--accent);
 }
 
 input:focus,
@@ -352,6 +437,13 @@ button:hover,
   text-decoration: none;
 }
 
+button:disabled,
+button:disabled:hover {
+  background: var(--disabled-bg);
+  color: #96a398;
+  cursor: not-allowed;
+}
+
 .button-row {
   display: flex;
   align-items: center;
@@ -369,6 +461,31 @@ button:hover,
 .secondary-button:hover {
   background: #d1e8d1;
   color: var(--accent-dark);
+}
+
+.secondary-button:disabled,
+.secondary-button:disabled:hover {
+  background: var(--disabled-bg);
+  border-color: var(--line);
+  color: #96a398;
+}
+
+.danger-button {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border: 1px solid #f0c2bd;
+}
+
+.danger-button:hover {
+  background: #ffe4e1;
+  color: #8f1f16;
+}
+
+.danger-button:disabled,
+.danger-button:disabled:hover {
+  background: var(--disabled-bg);
+  border-color: var(--line);
+  color: #96a398;
 }
 
 .link-button {
@@ -449,7 +566,7 @@ td:last-child {
 }
 
 .actions {
-  min-width: 150px;
+  min-width: 72px;
 }
 
 .actions a,
@@ -476,6 +593,42 @@ td:last-child {
   color: var(--muted);
   padding: 36px 16px;
   white-space: nowrap;
+}
+
+.select-column {
+  width: 44px;
+  text-align: center;
+}
+
+.batch-form {
+  display: block;
+}
+
+.batch-actions {
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  background: rgba(249, 252, 244, 0.9);
+}
+
+.batch-actions-hint {
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.batch-actions-buttons {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.batch-action-button {
+  min-width: 116px;
 }
 
 .pagination {
@@ -602,11 +755,71 @@ td:last-child {
   gap: 18px;
 }
 
-.account-grid {
+.account-action-list {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
-  align-items: start;
+  gap: 10px;
+  max-width: 520px;
+}
+
+.action-line-button {
+  width: 100%;
+  height: 44px;
+  justify-content: flex-start;
+  background: rgba(255, 254, 249, 0.97);
+  color: var(--text);
+  border: 1px solid var(--line);
+  box-shadow: 0 8px 20px rgba(42, 92, 62, 0.05);
+}
+
+.action-line-button:hover {
+  background: var(--panel-3);
+  color: var(--accent-dark);
+}
+
+.modal-dialog {
+  width: min(460px, calc(100% - 32px));
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 24px 70px rgba(23, 49, 36, 0.2);
+}
+
+.modal-dialog::backdrop {
+  background: rgba(23, 49, 36, 0.28);
+}
+
+.modal-form {
+  padding: 20px;
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.modal-head h2 {
+  margin: 0;
+  font-size: 17px;
+  white-space: nowrap;
+}
+
+.modal-close-button {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  padding: 0;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  font-size: 18px;
+}
+
+.modal-close-button:hover {
+  background: #d1e8d1;
+  color: var(--accent-dark);
 }
 
 .account-table h2 {
@@ -659,15 +872,21 @@ td:last-child {
     min-width: 900px;
   }
 
-  button:not(.link-button),
+  button:not(.link-button):not(.category-menu-button):not(.search-inline-button):not(.modal-close-button),
   .button-link {
     width: 100%;
   }
 
   .button-row,
-  .pagination {
+  .pagination,
+  .batch-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .batch-actions-buttons {
+    display: grid;
+    grid-template-columns: 1fr;
   }
 
   .account-grid {
