@@ -30,7 +30,9 @@
           <input type="hidden" name="category_id" value="{{ active_category_id }}">
         {% endif %}
         <input type="search" name="q" value="{{ q }}" placeholder="搜索文件名或标题">
-        <button type="submit">搜索</button>
+        <button type="submit" class="search-button" aria-label="搜索" title="搜索">
+          <span aria-hidden="true">&#128269;</span>
+        </button>
       </form>
     </div>
 
