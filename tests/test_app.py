@@ -12,7 +12,7 @@ def configure_temp_app(tmp_path, monkeypatch):
 
 def admin_user():
     with app.get_db() as conn:
-        return conn.execute("SELECT id FROM users WHERE username = ?", ("admin",)).fetchone()
+        return conn.execute("SELECT id, is_admin FROM users WHERE username = ?", ("admin",)).fetchone()
 
 
 def authenticated_client(user_id: int) -> TestClient:
@@ -177,3 +177,86 @@ def test_text_preview_loads_current_version_inline(tmp_path, monkeypatch):
     assert "版本管理" in preview.text
     assert inline_file.status_code == 200
     assert inline_file.headers["content-disposition"].startswith("inline")
+
+
+def test_admin_user_can_manage_account_users(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    user = admin_user()
+    client = authenticated_client(user["id"])
+
+    account_page = client.get("/account")
+
+    assert account_page.status_code == 200
+    assert "用户列表与权限管理" in account_page.text
+    assert user["is_admin"] == 1
+
+    create_response = client.post(
+        "/account/users",
+        data={
+            "username": "manager",
+            "password": "Password123",
+            "confirm_password": "Password123",
+            "is_admin": "0",
+        },
+    )
+
+    assert create_response.status_code == 200
+    assert "用户已新增" in create_response.text
+
+    with app.get_db() as conn:
+        managed_user = conn.execute(
+            "SELECT id, username, is_admin FROM users WHERE username = ?",
+            ("manager",),
+        ).fetchone()
+
+    assert managed_user["is_admin"] == 0
+
+    permission_response = client.post(
+        f"/account/users/{managed_user['id']}/admin",
+        data={"is_admin": "1"},
+    )
+
+    assert permission_response.status_code == 200
+    assert "权限已更新" in permission_response.text
+
+    with app.get_db() as conn:
+        managed_user = conn.execute("SELECT is_admin FROM users WHERE username = ?", ("manager",)).fetchone()
+
+    assert managed_user["is_admin"] == 1
+
+
+def test_last_admin_cannot_be_downgraded(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    user = admin_user()
+    client = authenticated_client(user["id"])
+
+    response = client.post(
+        f"/account/users/{user['id']}/admin",
+        data={"is_admin": "0"},
+    )
+
+    assert response.status_code == 400
+    assert "至少需要保留一个管理员" in response.text
+
+
+def test_user_can_change_own_password(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    user = admin_user()
+    client = authenticated_client(user["id"])
+
+    response = client.post(
+        "/account/password",
+        data={
+            "current_password": "admin123456",
+            "new_password": "NewPassword123",
+            "confirm_password": "NewPassword123",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "密码已更新" in response.text
+
+    with app.get_db() as conn:
+        db_user = conn.execute("SELECT password_hash FROM users WHERE id = ?", (user["id"],)).fetchone()
+
+    assert app.verify_password("NewPassword123", db_user["password_hash"])
