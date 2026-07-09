@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% set title = "用户信息 - 文件管理系统" %}
+{% block content %}
+<section class="account-layout">
+  <div class="section-head">
+    <div>
+      <p class="eyebrow">Account</p>
+      <h1>用户信息</h1>
+      <p class="muted">当前用户：{{ user.username }} · {{ "管理员" if user.is_admin else "普通用户" }}</p>
+    </div>
+    <a class="button-link secondary-button" href="/dashboard">返回文件列表</a>
+  </div>
+
+  {% if error %}
+    <div class="alert">{{ error }}</div>
+  {% endif %}
+  {% if success %}
+    <div class="alert success-alert">{{ success }}</div>
+  {% endif %}
+
+  <section class="account-grid">
+    <section class="panel-box">
+      <h2>修改密码</h2>
+      <form method="post" action="/account/password" class="form-stack">
+        <label>
+          <span>当前密码</span>
+          <input type="password" name="current_password" required>
+        </label>
+        <label>
+          <span>新密码</span>
+          <input type="password" name="new_password" minlength="8" required>
+        </label>
+        <label>
+          <span>确认新密码</span>
+          <input type="password" name="confirm_password" minlength="8" required>
+        </label>
+        <button type="submit">保存密码</button>
+      </form>
+    </section>
+
+    {% if user.is_admin %}
+      <section class="panel-box">
+        <h2>新增用户</h2>
+        <form method="post" action="/account/users" class="form-stack">
+          <label>
+            <span>用户名</span>
+            <input type="text" name="username" maxlength="50" required>
+          </label>
+          <label>
+            <span>初始密码</span>
+            <input type="password" name="password" minlength="8" required>
+          </label>
+          <label>
+            <span>确认初始密码</span>
+            <input type="password" name="confirm_password" minlength="8" required>
+          </label>
+          <label>
+            <span>权限</span>
+            <select name="is_admin">
+              <option value="0">普通用户</option>
+              <option value="1">管理员</option>
+            </select>
+          </label>
+          <button type="submit">新增用户</button>
+        </form>
+      </section>
+    {% endif %}
+  </section>
+
+  {% if user.is_admin %}
+    <section class="table-wrap account-table">
+      <h2>用户列表与权限管理</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>用户名</th>
+            <th>权限</th>
+            <th>创建时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for managed_user in managed_users %}
+            <tr>
+              <td>{{ managed_user.username }}</td>
+              <td>{{ "管理员" if managed_user.is_admin else "普通用户" }}</td>
+              <td>{{ managed_user.created_at[:19].replace("T", " ") }}</td>
+              <td class="actions">
+                <form method="post" action="/account/users/{{ managed_user.id }}/admin" class="inline-form">
+                  <select name="is_admin" aria-label="权限">
+                    <option value="0" {% if not managed_user.is_admin %}selected{% endif %}>普通用户</option>
+                    <option value="1" {% if managed_user.is_admin %}selected{% endif %}>管理员</option>
+                  </select>
+                  <button type="submit" class="small-button">保存</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  {% endif %}
+</section>
+{% endblock %}
