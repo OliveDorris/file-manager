@@ -10,12 +10,17 @@
     {% for category in categories %}
       <div class="category-row {% if active_category_id == category.id %}is-active{% endif %}">
         <a class="category-link {% if active_category_id == category.id %}active{% endif %}" href="/dashboard?category_id={{ category.id }}">{{ category.name }}</a>
-        <form method="post" action="/categories/{{ category.id }}/delete" class="category-delete-form" onsubmit="return confirm('确认删除这个文件夹吗？');">
-          <input type="hidden" name="active_category_id" value="{{ active_category_id or '' }}">
-          <input type="hidden" name="q" value="{{ q }}">
-          <input type="hidden" name="page" value="{{ pagination.page }}">
-          <button type="submit" class="category-menu-button" aria-label="删除 {{ category.name }}" title="删除文件夹">...</button>
-        </form>
+        <div class="category-menu" data-category-menu>
+          <button type="button" class="category-menu-button" aria-label="{{ category.name }} 更多操作" title="更多操作" aria-expanded="false">...</button>
+          <div class="category-menu-dropdown" data-category-menu-dropdown hidden>
+            <form method="post" action="/categories/{{ category.id }}/delete" class="category-delete-form" data-category-delete-form>
+              <input type="hidden" name="active_category_id" value="{{ active_category_id or '' }}">
+              <input type="hidden" name="q" value="{{ q }}">
+              <input type="hidden" name="page" value="{{ pagination.page }}">
+              <button type="submit" class="category-delete-menu-item">删除文件夹</button>
+            </form>
+          </div>
+        </div>
       </div>
     {% endfor %}
 
@@ -107,7 +112,16 @@
             {% for document in documents %}
               <tr>
                 <td class="select-column">
-                  <input type="checkbox" class="document-select" name="document_ids" value="{{ document.id }}" aria-label="选择 {{ document.title }}">
+                  <input
+                    type="checkbox"
+                    class="document-select"
+                    name="document_ids"
+                    value="{{ document.id }}"
+                    data-can-download="{{ 1 if document.can_download else 0 }}"
+                    data-can-delete="{{ 1 if document.can_manage else 0 }}"
+                    aria-label="选择 {{ document.title }}"
+                    {% if not document.can_download and not document.can_manage %}disabled{% endif %}
+                  >
                 </td>
                 <td><a href="/documents/{{ document.id }}">{{ document.title }}</a></td>
                 <td>{{ document.category_name or "未分类" }}</td>
@@ -115,7 +129,17 @@
                 <td>{{ document.original_filename or "-" }}</td>
                 <td>{{ (document.current_version_created_at or document.updated_at)[:19].replace("T", " ") }}</td>
                 <td class="actions">
-                  <a href="/documents/{{ document.id }}/preview">预览</a>
+                  {% if document.can_download %}
+                    <a href="/documents/{{ document.id }}/preview">预览</a>
+                  {% elif document.download_request_pending %}
+                    <button type="button" class="link-button" disabled>申请中</button>
+                  {% else %}
+                    <form method="post" action="/documents/{{ document.id }}/access-requests" class="inline-action-form">
+                      <input type="hidden" name="action" value="{{ action_download }}">
+                      <input type="hidden" name="return_to" value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
+                      <button type="submit" class="link-button">申请预览/下载</button>
+                    </form>
+                  {% endif %}
                 </td>
               </tr>
             {% else %}
@@ -159,25 +183,31 @@
   if (!form) return;
 
   const checkboxes = Array.from(form.querySelectorAll(".document-select"));
+  const selectableCheckboxes = checkboxes.filter((checkbox) => !checkbox.disabled);
   const selectAll = form.querySelector("[data-select-all]");
-  const actions = Array.from(form.querySelectorAll("[data-batch-action]"));
+  const downloadAction = form.querySelector('[formaction="/documents/batch-download"]');
   const deleteAction = form.querySelector("[data-batch-delete]");
 
   const updateActions = () => {
     const selectedCount = checkboxes.filter((checkbox) => checkbox.checked).length;
-    actions.forEach((button) => {
-      button.disabled = selectedCount === 0;
-    });
+    const selected = checkboxes.filter((checkbox) => checkbox.checked);
+    if (downloadAction) {
+      downloadAction.disabled = selectedCount === 0 || selected.some((checkbox) => checkbox.dataset.canDownload !== "1");
+    }
+    if (deleteAction) {
+      deleteAction.disabled = selectedCount === 0 || selected.some((checkbox) => checkbox.dataset.canDelete !== "1");
+    }
     if (selectAll) {
-      selectAll.disabled = checkboxes.length === 0;
-      selectAll.checked = selectedCount > 0 && selectedCount === checkboxes.length;
-      selectAll.indeterminate = selectedCount > 0 && selectedCount < checkboxes.length;
+      const selectedSelectableCount = selectableCheckboxes.filter((checkbox) => checkbox.checked).length;
+      selectAll.disabled = selectableCheckboxes.length === 0;
+      selectAll.checked = selectedSelectableCount > 0 && selectedSelectableCount === selectableCheckboxes.length;
+      selectAll.indeterminate = selectedSelectableCount > 0 && selectedSelectableCount < selectableCheckboxes.length;
     }
   };
 
   if (selectAll) {
     selectAll.addEventListener("change", () => {
-      checkboxes.forEach((checkbox) => {
+      selectableCheckboxes.forEach((checkbox) => {
         checkbox.checked = selectAll.checked;
       });
       updateActions();
@@ -198,6 +228,44 @@
   }
 
   updateActions();
+})();
+
+(() => {
+  const menus = Array.from(document.querySelectorAll("[data-category-menu]"));
+
+  const closeMenus = (exceptMenu = null) => {
+    menus.forEach((menu) => {
+      if (menu === exceptMenu) return;
+      const button = menu.querySelector(".category-menu-button");
+      const dropdown = menu.querySelector("[data-category-menu-dropdown]");
+      if (button) button.setAttribute("aria-expanded", "false");
+      if (dropdown) dropdown.hidden = true;
+    });
+  };
+
+  menus.forEach((menu) => {
+    const button = menu.querySelector(".category-menu-button");
+    const dropdown = menu.querySelector("[data-category-menu-dropdown]");
+    if (!button || !dropdown) return;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const willOpen = dropdown.hidden;
+      closeMenus(menu);
+      dropdown.hidden = !willOpen;
+      button.setAttribute("aria-expanded", String(willOpen));
+    });
+  });
+
+  document.querySelectorAll("[data-category-delete-form]").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      if (!confirm("确认删除这个文件夹吗？")) event.preventDefault();
+    });
+  });
+
+  document.addEventListener("click", () => closeMenus());
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeMenus();
+  });
 })();
 </script>
 {% endblock %}

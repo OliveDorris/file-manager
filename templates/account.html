@@ -2,6 +2,13 @@
 {% set title = "用户信息 - 文件管理系统" %}
 {% block content %}
 <section class="account-layout">
+  {% if error %}
+    <div class="alert">{{ error }}</div>
+  {% endif %}
+  {% if success %}
+    <div class="alert success-alert">{{ success }}</div>
+  {% endif %}
+
   <div class="section-head">
     <div>
       <p class="eyebrow">Account</p>
@@ -10,13 +17,6 @@
     </div>
     <a class="button-link secondary-button" href="/dashboard">返回文件列表</a>
   </div>
-
-  {% if error %}
-    <div class="alert">{{ error }}</div>
-  {% endif %}
-  {% if success %}
-    <div class="alert success-alert">{{ success }}</div>
-  {% endif %}
 
   <section class="account-action-list">
     <button type="button" class="action-line-button" data-dialog-open="password-dialog">修改密码</button>
@@ -85,6 +85,43 @@
   {% endif %}
 
   {% if user.is_admin %}
+    <section class="table-wrap account-table" id="access-requests">
+      <h2>文件操作申请</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>申请用户</th>
+            <th>文件</th>
+            <th>申请操作</th>
+            <th>申请时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for access_request in pending_access_requests %}
+            <tr>
+              <td>{{ access_request.requester_name }}</td>
+              <td><a href="/documents/{{ access_request.document_id }}">{{ access_request.document_title }}</a></td>
+              <td>{{ access_action_label(access_request.action) }}</td>
+              <td>{{ access_request.created_at[:19].replace("T", " ") }}</td>
+              <td class="actions">
+                <form method="post" action="/access-requests/{{ access_request.id }}/approve">
+                  <button type="submit" class="small-button">接受</button>
+                </form>
+                <form method="post" action="/access-requests/{{ access_request.id }}/reject">
+                  <button type="submit" class="small-button danger-button">拒绝</button>
+                </form>
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="5" class="empty">暂无待审批申请</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+
     <section class="table-wrap account-table">
       <h2>用户列表与权限管理</h2>
       <table>

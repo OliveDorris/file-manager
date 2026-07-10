@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, RedirectResponse, Response
@@ -23,6 +23,11 @@ from repositories.category_repository import (
     create_category as create_category_record,
     delete_category as delete_category_record,
     get_category,
+)
+from repositories.access_request_repository import (
+    count_pending_access_requests,
+    initialize_access_request_schema,
+    list_pending_access_requests,
 )
 from repositories.document_repository import (
     DOCUMENT_PAGE_SIZE,
@@ -56,6 +61,15 @@ from services.document_service import (
     remove_many_document_files,
 )
 from services.preview_service import build_preview_context
+from services.permission_service import (
+    ACTION_DOWNLOAD,
+    ACTION_UPLOAD_VERSION,
+    access_action_label,
+    build_document_access_flags,
+    build_document_access_flags_one,
+    review_access_request,
+    submit_access_request,
+)
 from services.user_service import (
     validate_admin_status_change,
     validate_password_pair,
@@ -163,6 +177,18 @@ def account_url(user_page: int) -> str:
     if user_page > 1:
         return f"/account?user_page={user_page}"
     return "/account"
+
+
+def local_url_with_message(return_to: str, success: str = "", error: str = "") -> str:
+    parsed = urlsplit(return_to)
+    if parsed.scheme or parsed.netloc or not parsed.path.startswith("/") or parsed.path.startswith("//"):
+        parsed = urlsplit("/dashboard")
+    params = [(key, value) for key, value in parse_qsl(parsed.query) if key not in {"success", "error"}]
+    if success:
+        params.append(("success", success))
+    if error:
+        params.append(("error", error))
+    return urlunsplit(("", "", parsed.path, urlencode(params), parsed.fragment))
 
 
 def dashboard_url_from_form(form: Any, success: str = "", error: str = "") -> str:
@@ -328,6 +354,7 @@ def init_db() -> None:
             );
             """
         )
+        initialize_access_request_schema(conn)
 
         user_columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "is_admin" not in user_columns:
@@ -401,6 +428,8 @@ def account_template(
     user_page: int = 1,
 ) -> Response:
     managed_users = []
+    pending_access_requests = []
+    pending_request_count = 0
     user_pagination: dict[str, Any] = {}
     if is_admin_user(user):
         with get_db() as conn:
@@ -408,6 +437,8 @@ def account_template(
             total_pages = max(1, (total_count + USER_PAGE_SIZE - 1) // USER_PAGE_SIZE)
             current_page = min(max(user_page, 1), total_pages)
             managed_users = list_users(conn, current_page)
+            pending_access_requests = list_pending_access_requests(conn)
+            pending_request_count = count_pending_access_requests(conn)
         user_pagination = {
             "page": current_page,
             "page_size": USER_PAGE_SIZE,
@@ -422,6 +453,9 @@ def account_template(
             "request": request,
             "user": user,
             "managed_users": managed_users,
+            "pending_access_requests": pending_access_requests,
+            "pending_request_count": pending_request_count,
+            "access_action_label": access_action_label,
             "user_pagination": user_pagination,
             "success": success,
             "error": error,
@@ -434,9 +468,11 @@ def account_template(
 def account_page(
     request: Request,
     user_page: int = 1,
+    success: str = "",
+    error: str = "",
     user: dict[str, Any] = Depends(get_current_user),
 ) -> Response:
-    return account_template(request, user, user_page=user_page)
+    return account_template(request, user, success=success, error=error, user_page=user_page)
 
 
 @app.post("/account/password")
@@ -577,8 +613,13 @@ def dashboard(
         total_count = count_documents(conn, category_id, cleaned_query)
         total_pages = max(1, (total_count + DOCUMENT_PAGE_SIZE - 1) // DOCUMENT_PAGE_SIZE)
         current_page = min(requested_page, total_pages)
-        documents = list_documents(conn, category_id, cleaned_query, current_page)
+        documents = build_document_access_flags(
+            conn,
+            user,
+            list_documents(conn, category_id, cleaned_query, current_page),
+        )
         categories = list_categories(conn)
+        pending_request_count = count_pending_access_requests(conn) if is_admin_user(user) else 0
 
     pagination = {
         "page": current_page,
@@ -598,6 +639,8 @@ def dashboard(
             "user": user,
             "documents": documents,
             "categories": categories,
+            "pending_request_count": pending_request_count,
+            "action_download": ACTION_DOWNLOAD,
             "active_category_id": category_id,
             "q": cleaned_query,
             "pagination": pagination,
@@ -719,7 +762,6 @@ async def batch_download_documents(
     request: Request,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> Response:
-    del user
     form = await request.form()
     try:
         document_ids = parse_selected_document_ids(form.getlist("document_ids"))
@@ -730,7 +772,17 @@ async def batch_download_documents(
         )
 
     with get_db() as conn:
-        documents = list_current_versions_for_documents(conn, document_ids)
+        documents = build_document_access_flags(
+            conn,
+            user,
+            list_current_versions_for_documents(conn, document_ids),
+        )
+
+    if len(documents) != len(document_ids) or any(not document["can_download"] for document in documents):
+        return RedirectResponse(
+            url=dashboard_url_from_form(form, error="选中文件中包含无权下载的文件，请先提交申请。"),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
 
     try:
         zip_path, download_name = build_batch_download_zip(documents, UPLOAD_DIR, DATA_DIR / "tmp")
@@ -771,10 +823,19 @@ async def batch_delete_documents(
         )
 
     with get_db() as conn:
-        documents = list_documents_by_ids(conn, document_ids)
+        documents = build_document_access_flags(
+            conn,
+            user,
+            list_documents_by_ids(conn, document_ids),
+        )
         if not documents:
             return RedirectResponse(
                 url=dashboard_url_from_form(form, error="请选择有效文件"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        if len(documents) != len(document_ids) or any(not document["can_manage"] for document in documents):
+            return RedirectResponse(
+                url=dashboard_url_from_form(form, error="只能删除自己上传的文件。"),
                 status_code=status.HTTP_303_SEE_OTHER,
             )
         deleted_count = delete_documents_by_ids(conn, [document["id"] for document in documents])
@@ -800,16 +861,97 @@ def get_document_or_404(conn: sqlite3.Connection, document_id: int) -> sqlite3.R
     return document
 
 
+@app.post("/documents/{document_id}/access-requests")
+def request_document_access(
+    request: Request,
+    document_id: int,
+    action: str = Form(...),
+    return_to: str = Form("/dashboard"),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> RedirectResponse:
+    with get_db() as conn:
+        document = get_document_or_404(conn, document_id)
+        try:
+            request_id, message = submit_access_request(conn, user, document, action, now_iso())
+        except ValueError as exc:
+            return RedirectResponse(
+                url=local_url_with_message(return_to, error=str(exc)),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        conn.commit()
+
+    if request_id is not None:
+        log_audit_action(
+            request,
+            user,
+            "request_document_access",
+            f"request_id={request_id}; document_id={document_id}; action={action}",
+        )
+    return RedirectResponse(
+        url=local_url_with_message(return_to, success=message),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@app.post("/access-requests/{request_id}/{decision}")
+def decide_access_request(
+    request: Request,
+    request_id: int,
+    decision: str,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> RedirectResponse:
+    require_admin_user(user)
+    decision_map = {"approve": "approved", "reject": "rejected"}
+    normalized_decision = decision_map.get(decision)
+    if not normalized_decision:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review action not found")
+
+    with get_db() as conn:
+        try:
+            access_request = review_access_request(
+                conn,
+                request_id,
+                int(user["id"]),
+                normalized_decision,
+                now_iso(),
+            )
+        except ValueError as exc:
+            return RedirectResponse(
+                url=local_url_with_message("/account#access-requests", error=str(exc)),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        conn.commit()
+
+    operation = "approve_access_request" if normalized_decision == "approved" else "reject_access_request"
+    log_audit_action(
+        request,
+        user,
+        operation,
+        (
+            f"request_id={request_id}; requester_id={access_request['requester_id']}; "
+            f"document_id={access_request['document_id']}; action={access_request['action']}"
+        ),
+    )
+    result_text = "已接受" if normalized_decision == "approved" else "已拒绝"
+    return RedirectResponse(
+        url=local_url_with_message("/account#access-requests", success=f"申请{result_text}"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
 @app.get("/documents/{document_id}")
 def document_detail(
     request: Request,
     document_id: int,
+    success: str = "",
+    error: str = "",
     user: dict[str, Any] = Depends(get_current_user),
 ) -> Response:
     with get_db() as conn:
-        document = get_document_or_404(conn, document_id)
+        document = build_document_access_flags_one(conn, user, get_document_or_404(conn, document_id))
         versions = list_document_versions(conn, document_id)
         categories = list_categories(conn)
+        pending_request_count = count_pending_access_requests(conn) if is_admin_user(user) else 0
 
     return templates.TemplateResponse(
         "document_detail.html",
@@ -819,7 +961,12 @@ def document_detail(
             "document": document,
             "versions": versions,
             "categories": categories,
+            "pending_request_count": pending_request_count,
+            "action_download": ACTION_DOWNLOAD,
+            "action_upload_version": ACTION_UPLOAD_VERSION,
             "max_upload_mb": MAX_UPLOAD_MB,
+            "success": success,
+            "error": error,
         },
     )
 
@@ -831,8 +978,11 @@ def document_preview(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> Response:
     with get_db() as conn:
-        document = get_document_or_404(conn, document_id)
+        document = build_document_access_flags_one(conn, user, get_document_or_404(conn, document_id))
+        if not document["can_download"]:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="请先申请文件下载权限")
         version = get_current_version(conn, document_id)
+        pending_request_count = count_pending_access_requests(conn) if is_admin_user(user) else 0
 
     if not version:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document has no version")
@@ -851,6 +1001,7 @@ def document_preview(
             "document": document,
             "version": version,
             "preview": preview,
+            "pending_request_count": pending_request_count,
         },
     )
 
@@ -860,9 +1011,10 @@ def preview_current_version_file(
     document_id: int,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> FileResponse:
-    del user
     with get_db() as conn:
-        get_document_or_404(conn, document_id)
+        document = build_document_access_flags_one(conn, user, get_document_or_404(conn, document_id))
+        if not document["can_download"]:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="请先申请文件下载权限")
         version = get_current_version(conn, document_id)
     if not version:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document has no version")
@@ -876,12 +1028,13 @@ def update_document_metadata(
     category_id: str = Form(""),
     user: dict[str, Any] = Depends(get_current_user),
 ) -> RedirectResponse:
-    del user
     cleaned_title = title.strip()
     if not cleaned_title:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Title is required")
     with get_db() as conn:
-        get_document_or_404(conn, document_id)
+        document = build_document_access_flags_one(conn, user, get_document_or_404(conn, document_id))
+        if not document["can_manage"]:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只能修改自己上传的文件")
         conn.execute(
             "UPDATE documents SET title = ?, category_id = ?, updated_at = ? WHERE id = ?",
             (cleaned_title, parse_optional_int(category_id), now_iso(), document_id),
@@ -897,7 +1050,9 @@ def delete_document(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> RedirectResponse:
     with get_db() as conn:
-        document = get_document_or_404(conn, document_id)
+        document = build_document_access_flags_one(conn, user, get_document_or_404(conn, document_id))
+        if not document["can_manage"]:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只能删除自己上传的文件")
         document_title = document["title"]
         conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
         conn.commit()
@@ -918,7 +1073,15 @@ def upload_new_version(
     original_filename = sanitize_filename(file.filename or "upload.bin")
 
     with get_db() as conn:
-        get_document_or_404(conn, document_id)
+        document = build_document_access_flags_one(conn, user, get_document_or_404(conn, document_id))
+        if not document["can_upload_version"]:
+            return RedirectResponse(
+                url=local_url_with_message(
+                    f"/documents/{document_id}",
+                    error="无权覆盖这个文件的新版本，请先提交申请。",
+                ),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
         latest = conn.execute(
             "SELECT COALESCE(MAX(version_number), 0) AS latest_version FROM document_versions WHERE document_id = ?",
             (document_id,),
@@ -983,9 +1146,10 @@ def download_current_version(
     document_id: int,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> FileResponse:
-    del user
     with get_db() as conn:
-        document = get_document_or_404(conn, document_id)
+        document = build_document_access_flags_one(conn, user, get_document_or_404(conn, document_id))
+        if not document["can_download"]:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="请先申请文件下载权限")
         if not document["current_version_id"]:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document has no version")
         return version_file_response(conn, document_id, document["current_version_id"])
@@ -997,6 +1161,8 @@ def download_version(
     version_id: int,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> FileResponse:
-    del user
     with get_db() as conn:
+        document = build_document_access_flags_one(conn, user, get_document_or_404(conn, document_id))
+        if not document["can_download"]:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="请先申请文件下载权限")
         return version_file_response(conn, document_id, version_id)

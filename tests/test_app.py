@@ -24,6 +24,22 @@ def authenticated_client(user_id: int) -> TestClient:
     return client
 
 
+def create_test_user(username: str, is_admin: bool = False):
+    with app.get_db() as conn:
+        user_id = app.create_user(
+            conn,
+            username,
+            app.password_hash("Password123"),
+            is_admin,
+            app.now_iso(),
+        )
+        conn.commit()
+        return conn.execute(
+            "SELECT id, username, is_admin FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+
+
 def insert_document(
     title: str,
     user_id: int,
@@ -451,3 +467,153 @@ def test_user_can_change_own_password(tmp_path, monkeypatch):
         db_user = conn.execute("SELECT password_hash FROM users WHERE id = ?", (user["id"],)).fetchone()
 
     assert app.verify_password("NewPassword123", db_user["password_hash"])
+
+
+def test_user_requests_download_and_admin_approval_grants_access(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    owner = admin_user()
+    requester = create_test_user("requester")
+    document_id = insert_document("Protected document", owner["id"], content="protected")
+    requester_client = authenticated_client(requester["id"])
+
+    denied = requester_client.get(f"/documents/{document_id}/download")
+    assert denied.status_code == 403
+
+    submitted = requester_client.post(
+        f"/documents/{document_id}/access-requests",
+        data={"action": "download", "return_to": f"/documents/{document_id}"},
+        follow_redirects=False,
+    )
+    assert submitted.status_code == 303
+    assert "success=" in submitted.headers["location"]
+
+    with app.get_db() as conn:
+        access_request = conn.execute(
+            "SELECT id, status FROM access_requests WHERE requester_id = ? AND document_id = ?",
+            (requester["id"], document_id),
+        ).fetchone()
+    assert access_request["status"] == "pending"
+
+    admin_client = authenticated_client(owner["id"])
+    account = admin_client.get("/account")
+    assert account.status_code == 200
+    assert "Protected document" in account.text
+    assert "notification-badge" in account.text
+
+    approved = admin_client.post(
+        f"/access-requests/{access_request['id']}/approve",
+        follow_redirects=False,
+    )
+    assert approved.status_code == 303
+
+    download = requester_client.get(f"/documents/{document_id}/download")
+    assert download.status_code == 200
+    assert download.content == b"protected"
+
+
+def test_user_cannot_delete_another_users_document(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    owner = create_test_user("owner")
+    other_user = create_test_user("other-user")
+    document_id = insert_document("Owner only", owner["id"])
+    client = authenticated_client(other_user["id"])
+
+    direct_delete = client.post(f"/documents/{document_id}/delete", follow_redirects=False)
+    assert direct_delete.status_code == 403
+
+    batch_delete = client.post(
+        "/documents/batch-delete",
+        data={"document_ids": [str(document_id)], "active_category_id": "", "q": "", "page": "1"},
+        follow_redirects=False,
+    )
+    assert batch_delete.status_code == 303
+    assert "error=" in batch_delete.headers["location"]
+
+    with app.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM documents WHERE id = ?", (document_id,)).fetchone()[0] == 1
+    assert (app.UPLOAD_DIR / str(document_id)).exists()
+
+
+def test_approved_upload_version_request_allows_new_version(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    owner = admin_user()
+    requester = create_test_user("version-requester")
+    document_id = insert_document("Version protected", owner["id"])
+    requester_client = authenticated_client(requester["id"])
+
+    denied = requester_client.post(
+        f"/documents/{document_id}/versions",
+        data={"notes": "not approved"},
+        files={"file": ("v2.txt", b"version two", "text/plain")},
+        follow_redirects=False,
+    )
+    assert denied.status_code == 303
+
+    requester_client.post(
+        f"/documents/{document_id}/access-requests",
+        data={"action": "upload_version", "return_to": f"/documents/{document_id}"},
+        follow_redirects=False,
+    )
+    with app.get_db() as conn:
+        access_request_id = conn.execute(
+            """
+            SELECT id FROM access_requests
+            WHERE requester_id = ? AND document_id = ? AND action = 'upload_version'
+            """,
+            (requester["id"], document_id),
+        ).fetchone()["id"]
+
+    admin_client = authenticated_client(owner["id"])
+    admin_client.post(f"/access-requests/{access_request_id}/approve", follow_redirects=False)
+
+    uploaded = requester_client.post(
+        f"/documents/{document_id}/versions",
+        data={"notes": "approved version"},
+        files={"file": ("v2.txt", b"version two", "text/plain")},
+        follow_redirects=False,
+    )
+    assert uploaded.status_code == 303
+
+    with app.get_db() as conn:
+        versions = conn.execute(
+            "SELECT version_number, uploaded_by FROM document_versions WHERE document_id = ? ORDER BY version_number",
+            (document_id,),
+        ).fetchall()
+    assert [(row["version_number"], row["uploaded_by"]) for row in versions] == [
+        (1, owner["id"]),
+        (2, requester["id"]),
+    ]
+
+
+def test_rejected_download_request_does_not_grant_access(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    owner = admin_user()
+    requester = create_test_user("rejected-requester")
+    document_id = insert_document("Rejected document", owner["id"])
+    requester_client = authenticated_client(requester["id"])
+
+    requester_client.post(
+        f"/documents/{document_id}/access-requests",
+        data={"action": "download", "return_to": f"/documents/{document_id}"},
+        follow_redirects=False,
+    )
+    with app.get_db() as conn:
+        access_request_id = conn.execute(
+            "SELECT id FROM access_requests WHERE requester_id = ? AND document_id = ?",
+            (requester["id"], document_id),
+        ).fetchone()["id"]
+
+    admin_client = authenticated_client(owner["id"])
+    rejected = admin_client.post(
+        f"/access-requests/{access_request_id}/reject",
+        follow_redirects=False,
+    )
+    assert rejected.status_code == 303
+
+    with app.get_db() as conn:
+        status_value = conn.execute(
+            "SELECT status FROM access_requests WHERE id = ?",
+            (access_request_id,),
+        ).fetchone()["status"]
+    assert status_value == "rejected"
+    assert requester_client.get(f"/documents/{document_id}/download").status_code == 403

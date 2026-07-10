@@ -11,6 +11,14 @@
     <a class="brand" href="/dashboard">文件管理系统</a>
     {% if user %}
       <nav class="nav">
+        {% if user.is_admin %}
+          <a class="notification-link" href="/account#access-requests" aria-label="待审批申请" title="待审批申请">
+            <span class="notification-icon" aria-hidden="true">&#128276;</span>
+            {% if pending_request_count %}
+              <span class="notification-badge">{{ pending_request_count if pending_request_count < 100 else "99+" }}</span>
+            {% endif %}
+          </a>
+        {% endif %}
         <a class="user-link" href="/account">{{ user.username }}</a>
         <a href="/logout">退出</a>
       </nav>

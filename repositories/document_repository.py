@@ -55,12 +55,14 @@ def list_documents(
     return conn.execute(
         f"""
         SELECT
-            d.id, d.title, d.created_at, d.updated_at,
+            d.id, d.title, d.owner_id, d.created_at, d.updated_at,
             c.name AS category_name,
+            u.username AS owner_name,
             v.original_filename, v.size_bytes, v.version_number,
             v.created_at AS current_version_created_at
         FROM documents d
         LEFT JOIN categories c ON c.id = d.category_id
+        LEFT JOIN users u ON u.id = d.owner_id
         LEFT JOIN document_versions v ON v.id = d.current_version_id
         {where_clause}
         ORDER BY v.created_at DESC, d.updated_at DESC, d.id DESC
@@ -75,7 +77,7 @@ def list_documents_by_ids(conn: sqlite3.Connection, document_ids: list[int]) -> 
         return []
     return conn.execute(
         f"""
-        SELECT id, title
+        SELECT id, title, owner_id
         FROM documents
         WHERE id IN ({id_placeholders(document_ids)})
         ORDER BY id
@@ -93,7 +95,7 @@ def list_current_versions_for_documents(
     return conn.execute(
         f"""
         SELECT
-            d.id, d.title,
+            d.id, d.title, d.owner_id,
             v.original_filename, v.stored_filename, v.content_type
         FROM documents d
         JOIN document_versions v ON v.id = d.current_version_id
