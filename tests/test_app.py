@@ -1,4 +1,6 @@
 from io import BytesIO
+import re
+import sqlite3
 import zipfile
 
 from fastapi.testclient import TestClient
@@ -617,3 +619,179 @@ def test_rejected_download_request_does_not_grant_access(tmp_path, monkeypatch):
         ).fetchone()["status"]
     assert status_value == "rejected"
     assert requester_client.get(f"/documents/{document_id}/download").status_code == 403
+
+
+def test_existing_category_table_is_migrated_with_parent_id(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True)
+    database_path = data_dir / "file_manager.sqlite3"
+    with sqlite3.connect(database_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO categories (name, description, created_at) VALUES ('旧分类', '', '2026-07-01')"
+        )
+        conn.commit()
+
+    monkeypatch.setattr(app, "DATA_DIR", data_dir)
+    monkeypatch.setattr(app, "UPLOAD_DIR", data_dir / "uploads")
+    monkeypatch.setattr(app, "DB_PATH", database_path)
+    app.init_db()
+
+    with app.get_db() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(categories)").fetchall()}
+        legacy_category = conn.execute(
+            "SELECT name, parent_id FROM categories WHERE name = '旧分类'"
+        ).fetchone()
+
+    assert "parent_id" in columns
+    assert legacy_category["parent_id"] is None
+
+
+def test_nested_categories_are_limited_to_three_levels(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    user = admin_user()
+    client = authenticated_client(user["id"])
+
+    parent_id = None
+    created_ids = []
+    for level in range(1, 4):
+        response = client.post(
+            "/categories",
+            data={
+                "name": f"层级-{level}",
+                "parent_id": str(parent_id or ""),
+                "active_category_id": "",
+                "q": "",
+                "page": "1",
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        with app.get_db() as conn:
+            parent_id = conn.execute(
+                "SELECT id FROM categories WHERE name = ?",
+                (f"层级-{level}",),
+            ).fetchone()["id"]
+        created_ids.append(parent_id)
+
+    rejected = client.post(
+        "/categories",
+        data={
+            "name": "层级-4",
+            "parent_id": str(created_ids[-1]),
+            "active_category_id": str(created_ids[-1]),
+            "q": "",
+            "page": "1",
+        },
+    )
+
+    assert rejected.status_code == 200
+    assert "最多支持三级文件夹" in rejected.text
+    with app.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM categories WHERE name = '层级-4'").fetchone()[0] == 0
+
+
+def test_parent_category_filter_includes_descendant_documents(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    user = admin_user()
+    with app.get_db() as conn:
+        parent_id = conn.execute(
+            "INSERT INTO categories (name, parent_id, description, created_at) VALUES (?, NULL, '', ?)",
+            ("父文件夹", app.now_iso()),
+        ).lastrowid
+        child_id = conn.execute(
+            "INSERT INTO categories (name, parent_id, description, created_at) VALUES (?, ?, '', ?)",
+            ("子文件夹", parent_id, app.now_iso()),
+        ).lastrowid
+        conn.commit()
+
+    insert_document("下级文件", user["id"], category_id=child_id)
+    client = authenticated_client(user["id"])
+    response = client.get(f"/dashboard?category_id={parent_id}")
+
+    assert response.status_code == 200
+    assert "下级文件" in response.text
+    assert "--category-depth: 1" in response.text
+
+
+def test_category_with_child_folder_cannot_be_deleted(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    user = admin_user()
+    with app.get_db() as conn:
+        parent_id = conn.execute(
+            "INSERT INTO categories (name, parent_id, description, created_at) VALUES (?, NULL, '', ?)",
+            ("待保护父文件夹", app.now_iso()),
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO categories (name, parent_id, description, created_at) VALUES (?, ?, '', ?)",
+            ("保留子文件夹", parent_id, app.now_iso()),
+        )
+        conn.commit()
+
+    client = authenticated_client(user["id"])
+    response = client.post(
+        f"/categories/{parent_id}/delete",
+        data={"active_category_id": str(parent_id), "q": "", "page": "1"},
+    )
+
+    assert response.status_code == 200
+    assert "文件夹中有文件，请清空后再删除文件夹。" in response.text
+    with app.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM categories WHERE id = ?", (parent_id,)).fetchone()[0] == 1
+
+
+def test_regular_user_can_select_any_file_and_batch_request_access(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    owner = admin_user()
+    requester = create_test_user("batch-requester")
+    first_id = insert_document("待申请一", owner["id"], filename="request-1.txt")
+    second_id = insert_document("待申请二", owner["id"], filename="request-2.txt")
+    client = authenticated_client(requester["id"])
+
+    dashboard = client.get("/dashboard")
+    assert dashboard.status_code == 200
+    checkbox_match = re.search(
+        rf'<input\s+[^>]*class="document-select"[^>]*value="{first_id}"[^>]*>',
+        dashboard.text,
+    )
+    assert checkbox_match is not None
+    assert "disabled" not in checkbox_match.group(0)
+    assert "<th>操作</th>" not in dashboard.text
+    assert 'formaction="/documents/batch-access-request"' in dashboard.text
+    assert "data-preview-action" in dashboard.text
+
+    response = client.post(
+        "/documents/batch-access-request",
+        data={
+            "document_ids": [str(first_id), str(second_id)],
+            "active_category_id": "",
+            "q": "",
+            "page": "1",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    with app.get_db() as conn:
+        requests = conn.execute(
+            """
+            SELECT document_id, status
+            FROM access_requests
+            WHERE requester_id = ? AND action = 'download'
+            ORDER BY document_id
+            """,
+            (requester["id"],),
+        ).fetchall()
+    assert [(row["document_id"], row["status"]) for row in requests] == [
+        (first_id, "pending"),
+        (second_id, "pending"),
+    ]

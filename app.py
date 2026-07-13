@@ -19,8 +19,8 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 
 from repositories.category_repository import (
+    count_child_categories,
     count_documents_in_category,
-    create_category as create_category_record,
     delete_category as delete_category_record,
     get_category,
 )
@@ -53,7 +53,12 @@ from repositories.user_repository import (
     update_user_admin_status,
     update_user_password,
 )
-from services.category_service import validate_category_can_delete
+from services.category_service import (
+    build_category_tree,
+    create_category_with_parent,
+    flatten_category_tree,
+    validate_category_can_delete,
+)
 from services.document_service import (
     build_batch_download_zip,
     parse_selected_document_ids,
@@ -69,6 +74,7 @@ from services.permission_service import (
     build_document_access_flags_one,
     review_access_request,
     submit_access_request,
+    submit_download_access_requests,
 )
 from services.user_service import (
     validate_admin_status_change,
@@ -320,8 +326,10 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS categories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
+                parent_id INTEGER,
                 description TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(parent_id) REFERENCES categories(id) ON DELETE RESTRICT
             );
 
             CREATE TABLE IF NOT EXISTS documents (
@@ -359,6 +367,12 @@ def init_db() -> None:
         user_columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "is_admin" not in user_columns:
             conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+
+        category_columns = {row["name"] for row in conn.execute("PRAGMA table_info(categories)").fetchall()}
+        if "parent_id" not in category_columns:
+            conn.execute(
+                "ALTER TABLE categories ADD COLUMN parent_id INTEGER REFERENCES categories(id) ON DELETE RESTRICT"
+            )
 
         admin_username = os.getenv("ADMIN_USERNAME", "admin")
         admin_password = os.getenv("ADMIN_PASSWORD", "admin123456")
@@ -619,6 +633,8 @@ def dashboard(
             list_documents(conn, category_id, cleaned_query, current_page),
         )
         categories = list_categories(conn)
+        category_tree = build_category_tree(categories, category_id)
+        category_options = flatten_category_tree(category_tree)
         pending_request_count = count_pending_access_requests(conn) if is_admin_user(user) else 0
 
     pagination = {
@@ -638,7 +654,8 @@ def dashboard(
             "request": request,
             "user": user,
             "documents": documents,
-            "categories": categories,
+            "category_tree": category_tree,
+            "category_options": category_options,
             "pending_request_count": pending_request_count,
             "action_download": ACTION_DOWNLOAD,
             "active_category_id": category_id,
@@ -653,18 +670,57 @@ def dashboard(
 
 @app.post("/categories")
 def create_category(
+    request: Request,
     name: str = Form(...),
     description: str = Form(""),
+    parent_id: str = Form(""),
+    active_category_id: str = Form(""),
+    q: str = Form(""),
+    page: int = Form(1),
     user: dict[str, Any] = Depends(get_current_user),
 ) -> RedirectResponse:
-    del user
-    cleaned_name = name.strip()
-    if not cleaned_name:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Category name is required")
+    return_category_id = parse_optional_int(active_category_id)
+    return_page = parse_page(page)
+    try:
+        parsed_parent_id = parse_optional_int(parent_id)
+    except ValueError:
+        return RedirectResponse(
+            url=dashboard_url(return_category_id, q, return_page, error="父文件夹无效"),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
     with get_db() as conn:
-        create_category_record(conn, cleaned_name, description.strip(), now_iso())
+        try:
+            category_id = create_category_with_parent(
+                conn,
+                name,
+                description,
+                parsed_parent_id,
+                now_iso(),
+            )
+        except ValueError as exc:
+            logger.warning(
+                "Failed to create category: user=%s parent_id=%s error=%s",
+                user["username"],
+                parsed_parent_id,
+                exc,
+            )
+            return RedirectResponse(
+                url=dashboard_url(return_category_id, q, return_page, error=str(exc)),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
         conn.commit()
-    return RedirectResponse(url="/dashboard", status_code=status.HTTP_303_SEE_OTHER)
+
+    log_audit_action(
+        request,
+        user,
+        "create_category",
+        f"category_id={category_id}; parent_id={parsed_parent_id or ''}; name={name.strip()}",
+    )
+    return RedirectResponse(
+        url=dashboard_url(category_id, q, 1, success="文件夹已创建"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @app.post("/categories/{category_id}/delete")
@@ -687,7 +743,10 @@ def delete_category(
                 status_code=status.HTTP_303_SEE_OTHER,
             )
         try:
-            validate_category_can_delete(count_documents_in_category(conn, category_id))
+            validate_category_can_delete(
+                count_documents_in_category(conn, category_id),
+                count_child_categories(conn, category_id),
+            )
         except ValueError as exc:
             return RedirectResponse(
                 url=dashboard_url(return_category_id, q, return_page, error=str(exc)),
@@ -805,6 +864,53 @@ async def batch_download_documents(
         filename=download_name,
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
         background=BackgroundTask(lambda path: Path(path).unlink(missing_ok=True), str(zip_path)),
+    )
+
+
+@app.post("/documents/batch-access-request")
+async def batch_request_document_access(
+    request: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> RedirectResponse:
+    form = await request.form()
+    try:
+        document_ids = parse_selected_document_ids(form.getlist("document_ids"))
+    except ValueError as exc:
+        return RedirectResponse(
+            url=dashboard_url_from_form(form, error=str(exc)),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    with get_db() as conn:
+        documents = list_documents_by_ids(conn, document_ids)
+        if len(documents) != len(document_ids):
+            return RedirectResponse(
+                url=dashboard_url_from_form(form, error="选中的文件无效，请刷新页面后重试。"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        result = submit_download_access_requests(conn, user, documents, now_iso())
+        conn.commit()
+
+    created_ids = result["created_request_ids"]
+    if created_ids:
+        log_audit_action(
+            request,
+            user,
+            "batch_request_document_access",
+            (
+                f"request_ids={','.join(str(request_id) for request_id in created_ids)}; "
+                f"document_ids={','.join(str(document_id) for document_id in document_ids)}"
+            ),
+        )
+        message = f"已提交 {result['created_count']} 个预览/下载申请，请等待管理员处理"
+    elif result["pending_count"]:
+        message = "选中文件的申请已提交，请等待管理员处理"
+    else:
+        message = "选中文件已拥有预览/下载权限"
+
+    return RedirectResponse(
+        url=dashboard_url_from_form(form, success=message),
+        status_code=status.HTTP_303_SEE_OTHER,
     )
 
 
@@ -951,6 +1057,7 @@ def document_detail(
         document = build_document_access_flags_one(conn, user, get_document_or_404(conn, document_id))
         versions = list_document_versions(conn, document_id)
         categories = list_categories(conn)
+        category_options = flatten_category_tree(build_category_tree(categories, document["category_id"]))
         pending_request_count = count_pending_access_requests(conn) if is_admin_user(user) else 0
 
     return templates.TemplateResponse(
@@ -960,7 +1067,7 @@ def document_detail(
             "user": user,
             "document": document,
             "versions": versions,
-            "categories": categories,
+            "categories": category_options,
             "pending_request_count": pending_request_count,
             "action_download": ACTION_DOWNLOAD,
             "action_upload_version": ACTION_UPLOAD_VERSION,

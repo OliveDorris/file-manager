@@ -107,7 +107,7 @@
           <select name="category_id">
             <option value="">未分类</option>
             {% for category in categories %}
-              <option value="{{ category.id }}" {% if document.category_id == category.id %}selected{% endif %}>{{ category.name }}</option>
+              <option value="{{ category.id }}" {% if document.category_id == category.id %}selected{% endif %}>{{ category.display_name }}</option>
             {% endfor %}
           </select>
         </label>

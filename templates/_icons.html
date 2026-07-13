@@ -1,0 +1,29 @@
+{% macro icon(name) -%}
+<svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  {% if name == "eye" %}
+    <path d="M2.1 12s3.6-6.5 9.9-6.5S21.9 12 21.9 12 18.3 18.5 12 18.5 2.1 12 2.1 12Z" />
+    <circle cx="12" cy="12" r="3" />
+  {% elif name == "download" %}
+    <path d="M12 3v12" />
+    <path d="m7 10 5 5 5-5" />
+    <path d="M5 21h14" />
+  {% elif name == "trash" %}
+    <path d="M3 6h18" />
+    <path d="M8 6V4h8v2" />
+    <path d="m19 6-1 14H6L5 6" />
+    <path d="M10 11v5M14 11v5" />
+  {% elif name == "key" %}
+    <circle cx="7.5" cy="15.5" r="4.5" />
+    <path d="m10.7 12.3 8.8-8.8" />
+    <path d="m15 8 2 2M17.5 5.5l2 2" />
+  {% elif name == "plus" %}
+    <path d="M12 5v14M5 12h14" />
+  {% elif name == "chevron" %}
+    <path d="m9 18 6-6-6-6" />
+  {% elif name == "more" %}
+    <circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+    <circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" />
+  {% endif %}
+</svg>
+{%- endmacro %}

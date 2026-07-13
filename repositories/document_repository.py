@@ -12,7 +12,20 @@ def document_filter_clause(category_id: int | None, q: str) -> tuple[str, list[A
     params: list[Any] = []
 
     if category_id:
-        filters.append("d.category_id = ?")
+        filters.append(
+            """
+            d.category_id IN (
+                WITH RECURSIVE category_tree(id) AS (
+                    SELECT id FROM categories WHERE id = ?
+                    UNION ALL
+                    SELECT c.id
+                    FROM categories c
+                    JOIN category_tree ON c.parent_id = category_tree.id
+                )
+                SELECT id FROM category_tree
+            )
+            """
+        )
         params.append(category_id)
 
     cleaned_query = q.strip()
@@ -117,7 +130,9 @@ def delete_documents_by_ids(conn: sqlite3.Connection, document_ids: list[int]) -
 
 
 def list_categories(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    return conn.execute("SELECT id, name FROM categories ORDER BY name").fetchall()
+    return conn.execute(
+        "SELECT id, name, parent_id FROM categories ORDER BY name, id"
+    ).fetchall()
 
 
 def get_document_detail(conn: sqlite3.Connection, document_id: int) -> sqlite3.Row | None:

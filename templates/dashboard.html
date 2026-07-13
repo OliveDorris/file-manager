@@ -1,37 +1,80 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 {% set title = "文件列表 - 文件管理系统" %}
+
+{% macro render_category_nodes(nodes) %}
+  {% for category in nodes %}
+    <div class="category-node" data-category-node style="--category-depth: {{ category.depth - 1 }};">
+      <div class="category-row {% if active_category_id == category.id %}is-active{% endif %}">
+        {% if category.children %}
+          <button
+            type="button"
+            class="category-toggle {% if category.is_expanded %}is-expanded{% endif %}"
+            data-category-toggle
+            aria-label="展开或收起 {{ category.name }}"
+            aria-expanded="{{ 'true' if category.is_expanded else 'false' }}"
+          >{{ icon("chevron") }}</button>
+        {% else %}
+          <span class="category-toggle-spacer" aria-hidden="true"></span>
+        {% endif %}
+        <a class="category-link {% if active_category_id == category.id %}active{% endif %}" href="/dashboard?category_id={{ category.id }}">{{ category.name }}</a>
+        <div class="category-row-controls">
+          <span class="category-control-wrap" data-tooltip="{{ '最多支持三级文件夹' if category.depth >= 3 else '新建子文件夹' }}">
+            <button
+              type="button"
+              class="category-icon-button"
+              data-category-create
+              data-parent-id="{{ category.id }}"
+              data-parent-name="{{ category.name }}"
+              aria-label="在 {{ category.name }} 下新建文件夹"
+              {% if category.depth >= 3 %}disabled{% endif %}
+            >{{ icon("plus") }}</button>
+          </span>
+          <div class="category-menu" data-category-menu>
+            <button type="button" class="category-menu-button" aria-label="{{ category.name }} 更多操作" aria-expanded="false">{{ icon("more") }}</button>
+            <div class="category-menu-dropdown" data-category-menu-dropdown hidden>
+              <form method="post" action="/categories/{{ category.id }}/delete" class="category-delete-form" data-category-delete-form>
+                <input type="hidden" name="active_category_id" value="{{ active_category_id or '' }}">
+                <input type="hidden" name="q" value="{{ q }}">
+                <input type="hidden" name="page" value="{{ pagination.page }}">
+                <button type="submit" class="category-delete-menu-item">删除文件夹</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+      {% if category.children %}
+        <div class="category-children" {% if not category.is_expanded %}hidden{% endif %}>
+          {{ render_category_nodes(category.children) }}
+        </div>
+      {% endif %}
+    </div>
+  {% endfor %}
+{% endmacro %}
+
 {% block content %}
 <section class="layout">
   <aside class="sidebar">
     <h2>分类</h2>
-    <div class="category-row {% if not active_category_id %}is-active{% endif %}">
+    <div class="category-row category-root-row {% if not active_category_id %}is-active{% endif %}">
+      <span class="category-toggle-spacer" aria-hidden="true"></span>
       <a class="category-link {% if not active_category_id %}active{% endif %}" href="/dashboard">全部文件</a>
-    </div>
-    {% for category in categories %}
-      <div class="category-row {% if active_category_id == category.id %}is-active{% endif %}">
-        <a class="category-link {% if active_category_id == category.id %}active{% endif %}" href="/dashboard?category_id={{ category.id }}">{{ category.name }}</a>
-        <div class="category-menu" data-category-menu>
-          <button type="button" class="category-menu-button" aria-label="{{ category.name }} 更多操作" title="更多操作" aria-expanded="false">...</button>
-          <div class="category-menu-dropdown" data-category-menu-dropdown hidden>
-            <form method="post" action="/categories/{{ category.id }}/delete" class="category-delete-form" data-category-delete-form>
-              <input type="hidden" name="active_category_id" value="{{ active_category_id or '' }}">
-              <input type="hidden" name="q" value="{{ q }}">
-              <input type="hidden" name="page" value="{{ pagination.page }}">
-              <button type="submit" class="category-delete-menu-item">删除文件夹</button>
-            </form>
-          </div>
-        </div>
+      <div class="category-row-controls is-visible">
+        <span class="category-control-wrap" data-tooltip="新建一级文件夹">
+          <button
+            type="button"
+            class="category-icon-button"
+            data-category-create
+            data-parent-id=""
+            data-parent-name="根目录"
+            aria-label="新建一级文件夹"
+          >{{ icon("plus") }}</button>
+        </span>
       </div>
-    {% endfor %}
-
-    <form method="post" action="/categories" class="compact-form">
-      <label>
-        <span>新增分类</span>
-        <input type="text" name="name" placeholder="例如：合同归档" required>
-      </label>
-      <input type="hidden" name="description" value="">
-      <button type="submit">添加</button>
-    </form>
+    </div>
+    <div class="category-tree">
+      {{ render_category_nodes(category_tree) }}
+    </div>
   </aside>
 
   <section class="content">
@@ -71,8 +114,8 @@
           <span>分类</span>
           <select name="category_id">
             <option value="">未分类</option>
-            {% for category in categories %}
-              <option value="{{ category.id }}">{{ category.name }}</option>
+            {% for category in category_options %}
+              <option value="{{ category.id }}">{{ category.display_name }}</option>
             {% endfor %}
           </select>
         </label>
@@ -105,7 +148,6 @@
               <th>当前版本</th>
               <th>文件名</th>
               <th>更新时间</th>
-              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -119,8 +161,9 @@
                     value="{{ document.id }}"
                     data-can-download="{{ 1 if document.can_download else 0 }}"
                     data-can-delete="{{ 1 if document.can_manage else 0 }}"
+                    data-request-pending="{{ 1 if document.download_request_pending else 0 }}"
+                    data-preview-url="/documents/{{ document.id }}/preview"
                     aria-label="选择 {{ document.title }}"
-                    {% if not document.can_download and not document.can_manage %}disabled{% endif %}
                   >
                 </td>
                 <td><a href="/documents/{{ document.id }}">{{ document.title }}</a></td>
@@ -128,32 +171,29 @@
                 <td>v{{ document.version_number or 0 }}</td>
                 <td>{{ document.original_filename or "-" }}</td>
                 <td>{{ (document.current_version_created_at or document.updated_at)[:19].replace("T", " ") }}</td>
-                <td class="actions">
-                  {% if document.can_download %}
-                    <a href="/documents/{{ document.id }}/preview">预览</a>
-                  {% elif document.download_request_pending %}
-                    <button type="button" class="link-button" disabled>申请中</button>
-                  {% else %}
-                    <form method="post" action="/documents/{{ document.id }}/access-requests" class="inline-action-form">
-                      <input type="hidden" name="action" value="{{ action_download }}">
-                      <input type="hidden" name="return_to" value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
-                      <button type="submit" class="link-button">申请预览/下载</button>
-                    </form>
-                  {% endif %}
-                </td>
               </tr>
             {% else %}
               <tr>
-                <td colspan="7" class="empty">暂无文件</td>
+                <td colspan="6" class="empty">暂无文件</td>
               </tr>
             {% endfor %}
           </tbody>
         </table>
         <div class="batch-actions">
-          <div class="batch-actions-hint">可选择多个文件后批量操作</div>
-          <div class="batch-actions-buttons">
-            <button type="submit" formaction="/documents/batch-download" class="secondary-button batch-action-button" data-batch-action disabled>下载选中文件</button>
-            <button type="submit" formaction="/documents/batch-delete" class="danger-button batch-action-button" data-batch-action data-batch-delete disabled>删除选中文件</button>
+          <div class="batch-actions-hint" data-selection-status>请选择文件后进行操作</div>
+          <div class="batch-actions-buttons" aria-label="文件批量操作">
+            <span class="icon-action-wrap" data-action-wrap="request" data-tooltip="请先选择文件">
+              <button type="submit" formaction="/documents/batch-access-request" class="icon-action-button" data-request-action disabled aria-label="申请预览和下载权限">{{ icon("key") }}</button>
+            </span>
+            <span class="icon-action-wrap" data-action-wrap="preview" data-tooltip="请先选择文件">
+              <button type="button" class="icon-action-button" data-preview-action disabled aria-label="预览文件">{{ icon("eye") }}</button>
+            </span>
+            <span class="icon-action-wrap" data-action-wrap="download" data-tooltip="请先选择文件">
+              <button type="submit" formaction="/documents/batch-download" class="icon-action-button" data-download-action disabled aria-label="下载选中文件">{{ icon("download") }}</button>
+            </span>
+            <span class="icon-action-wrap" data-action-wrap="delete" data-tooltip="请先选择文件">
+              <button type="submit" formaction="/documents/batch-delete" class="icon-action-button danger-icon-button" data-delete-action disabled aria-label="删除选中文件">{{ icon("trash") }}</button>
+            </span>
           </div>
         </div>
       </form>
@@ -177,51 +217,138 @@
   </section>
 </section>
 
+<dialog class="modal-dialog category-dialog" id="category-dialog">
+  <form method="post" action="/categories" class="form-stack modal-form">
+    <div class="modal-head">
+      <h2>新建文件夹</h2>
+      <button type="button" class="modal-close-button" data-category-dialog-close aria-label="关闭">×</button>
+    </div>
+    <p class="category-dialog-parent">上级：<strong data-category-parent-label>根目录</strong></p>
+    <label>
+      <span>文件夹名称</span>
+      <input type="text" name="name" maxlength="50" autocomplete="off" required>
+    </label>
+    <input type="hidden" name="description" value="">
+    <input type="hidden" name="parent_id" data-category-parent-input value="">
+    <input type="hidden" name="active_category_id" value="{{ active_category_id or '' }}">
+    <input type="hidden" name="q" value="{{ q }}">
+    <input type="hidden" name="page" value="{{ pagination.page }}">
+    <div class="button-row">
+      <button type="button" class="secondary-button" data-category-dialog-close>取消</button>
+      <button type="submit">创建</button>
+    </div>
+  </form>
+</dialog>
+
 <script>
 (() => {
   const form = document.querySelector("[data-batch-form]");
   if (!form) return;
 
   const checkboxes = Array.from(form.querySelectorAll(".document-select"));
-  const selectableCheckboxes = checkboxes.filter((checkbox) => !checkbox.disabled);
   const selectAll = form.querySelector("[data-select-all]");
-  const downloadAction = form.querySelector('[formaction="/documents/batch-download"]');
-  const deleteAction = form.querySelector("[data-batch-delete]");
+  const selectionStatus = form.querySelector("[data-selection-status]");
+  const requestAction = form.querySelector("[data-request-action]");
+  const previewAction = form.querySelector("[data-preview-action]");
+  const downloadAction = form.querySelector("[data-download-action]");
+  const deleteAction = form.querySelector("[data-delete-action]");
+
+  const setActionState = (name, button, disabled, tooltip) => {
+    if (!button) return;
+    button.disabled = disabled;
+    const wrapper = form.querySelector(`[data-action-wrap="${name}"]`);
+    if (wrapper) wrapper.dataset.tooltip = tooltip;
+  };
 
   const updateActions = () => {
-    const selectedCount = checkboxes.filter((checkbox) => checkbox.checked).length;
     const selected = checkboxes.filter((checkbox) => checkbox.checked);
-    if (downloadAction) {
-      downloadAction.disabled = selectedCount === 0 || selected.some((checkbox) => checkbox.dataset.canDownload !== "1");
+    const selectedCount = selected.length;
+    const allDownloadable = selectedCount > 0 && selected.every((checkbox) => checkbox.dataset.canDownload === "1");
+    const allDeletable = selectedCount > 0 && selected.every((checkbox) => checkbox.dataset.canDelete === "1");
+    const requestable = selected.filter(
+      (checkbox) => checkbox.dataset.canDownload !== "1" && checkbox.dataset.requestPending !== "1"
+    );
+    const hasPendingRequest = selected.some((checkbox) => checkbox.dataset.requestPending === "1");
+
+    if (selectionStatus) {
+      selectionStatus.textContent = selectedCount ? `已选择 ${selectedCount} 个文件` : "请选择文件后进行操作";
     }
-    if (deleteAction) {
-      deleteAction.disabled = selectedCount === 0 || selected.some((checkbox) => checkbox.dataset.canDelete !== "1");
-    }
+
+    setActionState(
+      "request",
+      requestAction,
+      requestable.length === 0,
+      selectedCount === 0
+        ? "请先选择文件"
+        : requestable.length > 0
+          ? "申请预览/下载权限"
+          : hasPendingRequest
+            ? "申请已提交，请等待管理员处理"
+            : "选中文件已有预览/下载权限"
+    );
+    setActionState(
+      "preview",
+      previewAction,
+      selectedCount !== 1 || !allDownloadable,
+      selectedCount === 0
+        ? "请先选择文件"
+        : selectedCount > 1
+          ? "预览仅支持单个文件"
+          : allDownloadable
+            ? "预览"
+            : "请先申请预览/下载权限"
+    );
+    setActionState(
+      "download",
+      downloadAction,
+      !allDownloadable,
+      selectedCount === 0
+        ? "请先选择文件"
+        : allDownloadable
+          ? "下载"
+          : "选中文件中存在未授权文件，请先申请"
+    );
+    setActionState(
+      "delete",
+      deleteAction,
+      !allDeletable,
+      selectedCount === 0
+        ? "请先选择文件"
+        : allDeletable
+          ? "删除"
+          : "只能删除自己上传的文件"
+    );
+
     if (selectAll) {
-      const selectedSelectableCount = selectableCheckboxes.filter((checkbox) => checkbox.checked).length;
-      selectAll.disabled = selectableCheckboxes.length === 0;
-      selectAll.checked = selectedSelectableCount > 0 && selectedSelectableCount === selectableCheckboxes.length;
-      selectAll.indeterminate = selectedSelectableCount > 0 && selectedSelectableCount < selectableCheckboxes.length;
+      selectAll.disabled = checkboxes.length === 0;
+      selectAll.checked = selectedCount > 0 && selectedCount === checkboxes.length;
+      selectAll.indeterminate = selectedCount > 0 && selectedCount < checkboxes.length;
     }
   };
 
   if (selectAll) {
     selectAll.addEventListener("change", () => {
-      selectableCheckboxes.forEach((checkbox) => {
+      checkboxes.forEach((checkbox) => {
         checkbox.checked = selectAll.checked;
       });
       updateActions();
     });
   }
 
-  checkboxes.forEach((checkbox) => {
-    checkbox.addEventListener("change", updateActions);
-  });
+  checkboxes.forEach((checkbox) => checkbox.addEventListener("change", updateActions));
+
+  if (previewAction) {
+    previewAction.addEventListener("click", () => {
+      const selected = checkboxes.filter((checkbox) => checkbox.checked);
+      if (selected.length === 1 && selected[0].dataset.canDownload === "1") {
+        window.location.href = selected[0].dataset.previewUrl;
+      }
+    });
+  }
 
   if (deleteAction) {
     deleteAction.addEventListener("click", (event) => {
-      const hasSelection = checkboxes.some((checkbox) => checkbox.checked);
-      if (!hasSelection || !confirm("确认删除选中的文件及其全部历史版本吗？")) {
+      if (deleteAction.disabled || !confirm("确认删除选中的文件及其全部历史版本吗？")) {
         event.preventDefault();
       }
     });
@@ -231,28 +358,74 @@
 })();
 
 (() => {
-  const menus = Array.from(document.querySelectorAll("[data-category-menu]"));
+  document.querySelectorAll("[data-category-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const node = button.closest("[data-category-node]");
+      const children = node ? node.querySelector(":scope > .category-children") : null;
+      if (!children) return;
+      children.hidden = !children.hidden;
+      button.classList.toggle("is-expanded", !children.hidden);
+      button.setAttribute("aria-expanded", String(!children.hidden));
+    });
+  });
 
-  const closeMenus = (exceptMenu = null) => {
+  const dialog = document.getElementById("category-dialog");
+  const parentInput = dialog ? dialog.querySelector("[data-category-parent-input]") : null;
+  const parentLabel = dialog ? dialog.querySelector("[data-category-parent-label]") : null;
+  const nameInput = dialog ? dialog.querySelector('input[name="name"]') : null;
+
+  document.querySelectorAll("[data-category-create]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (!dialog || button.disabled) return;
+      if (parentInput) parentInput.value = button.dataset.parentId || "";
+      if (parentLabel) parentLabel.textContent = button.dataset.parentName || "根目录";
+      if (nameInput) nameInput.value = "";
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "open");
+      if (nameInput) nameInput.focus();
+    });
+  });
+
+  if (dialog) {
+    dialog.querySelectorAll("[data-category-dialog-close]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (typeof dialog.close === "function") dialog.close();
+        else dialog.removeAttribute("open");
+      });
+    });
+    dialog.addEventListener("click", (event) => {
+      if (event.target === dialog) {
+        if (typeof dialog.close === "function") dialog.close();
+        else dialog.removeAttribute("open");
+      }
+    });
+  }
+
+  const menus = Array.from(document.querySelectorAll("[data-category-menu]"));
+  const closeMenus = () => {
     menus.forEach((menu) => {
-      if (menu === exceptMenu) return;
       const button = menu.querySelector(".category-menu-button");
       const dropdown = menu.querySelector("[data-category-menu-dropdown]");
       if (button) button.setAttribute("aria-expanded", "false");
       if (dropdown) dropdown.hidden = true;
+      const row = menu.closest(".category-row");
+      if (row) row.classList.remove("menu-open");
     });
   };
 
   menus.forEach((menu) => {
     const button = menu.querySelector(".category-menu-button");
     const dropdown = menu.querySelector("[data-category-menu-dropdown]");
+    menu.addEventListener("click", (event) => event.stopPropagation());
     if (!button || !dropdown) return;
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
+    button.addEventListener("click", () => {
       const willOpen = dropdown.hidden;
-      closeMenus(menu);
+      closeMenus();
       dropdown.hidden = !willOpen;
       button.setAttribute("aria-expanded", String(willOpen));
+      const row = menu.closest(".category-row");
+      if (row) row.classList.toggle("menu-open", willOpen);
     });
   });
 
@@ -262,7 +435,7 @@
     });
   });
 
-  document.addEventListener("click", () => closeMenus());
+  document.addEventListener("click", closeMenus);
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") closeMenus();
   });

@@ -113,6 +113,42 @@ def submit_access_request(
     return request_id, "申请已提交，请等待管理员处理"
 
 
+def submit_download_access_requests(
+    conn: sqlite3.Connection,
+    user: Mapping[str, Any],
+    documents: list[Mapping[str, Any] | sqlite3.Row],
+    created_at: str,
+) -> dict[str, Any]:
+    flagged_documents = build_document_access_flags(conn, user, documents)
+    created_request_ids: list[int] = []
+    accessible_count = 0
+    pending_count = 0
+
+    for document in flagged_documents:
+        if document["can_download"]:
+            accessible_count += 1
+            continue
+        if document["download_request_pending"]:
+            pending_count += 1
+            continue
+        request_id, _ = submit_access_request(
+            conn,
+            user,
+            document,
+            ACTION_DOWNLOAD,
+            created_at,
+        )
+        if request_id is not None:
+            created_request_ids.append(request_id)
+
+    return {
+        "created_request_ids": created_request_ids,
+        "created_count": len(created_request_ids),
+        "accessible_count": accessible_count,
+        "pending_count": pending_count,
+    }
+
+
 def review_access_request(
     conn: sqlite3.Connection,
     request_id: int,
