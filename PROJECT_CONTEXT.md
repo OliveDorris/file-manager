@@ -24,6 +24,7 @@ GitHub 仓库：
 - 管理员新增用户。
 - 管理员查看用户列表，用户列表每页最多 10 条。
 - 管理员设置用户是否为管理员。
+- 管理员启用或停用其他用户；禁止停用当前登录账号，停用账号不能登录，已有会话也会在下一次请求时失效。
 - 文件分类。
 - 通过分类旁的加号和弹窗新增文件夹，支持最多三级树形分类。
 - 分类树支持展开、收起和逐级缩进；选择父文件夹时会同时显示下级文件夹中的文档。
@@ -51,6 +52,7 @@ GitHub 仓库：
 - 审批通过后，申请用户持续拥有对应文件和对应操作的权限；删除他人文件不开放申请。
 - 登录、创建/删除分类、删除文档、批量删除文档、修改密码、新增用户、修改用户权限、提交文件操作申请和审批操作会写入基础审计日志。
 - SQLite 自动初始化数据库表和默认分类。
+- 提供 SQLite 一致性数据库备份脚本，支持完整性检查和保留最近指定数量的备份；该脚本不备份上传文件。
 
 默认初始化分类：
 
@@ -77,13 +79,14 @@ GitHub 仓库：
 - 新增轻量分层目录：
   - `repositories/`：数据库查询和持久化逻辑。
   - `services/`：业务判断、文件预览、文件权限和审批逻辑。
+  - `scripts/`：数据库备份等独立运维脚本。
 
 数据库：
 
 - SQLite。
 - 生产数据库路径：`/home/file-manager/data/file_manager.sqlite3`。
 - 数据库表包括：`users`、`categories`、`documents`、`document_versions`、`access_requests`。
-- `users` 表包含 `is_admin` 字段，使用 `1/0` 标记管理员或普通用户。
+- `users` 表包含 `is_admin` 和 `is_active` 字段，分别标记管理员权限和账号启用状态；旧数据库启动时会自动补充 `is_active`，已有用户默认启用。
 - `categories` 表包含 `parent_id` 字段；旧数据库启动时自动迁移，旧分类保留为一级分类。
 - `access_requests` 表记录申请人、文件、操作类型、审批状态、审批人和申请/审批时间。
 
@@ -154,6 +157,8 @@ ADMIN_PASSWORD=生产密码，不应提交到 GitHub
 SECRET_KEY=生产密钥，不应提交到 GitHub
 DATABASE_PATH=/home/file-manager/data/file_manager.sqlite3
 DATA_DIR=/home/file-manager/data
+DATABASE_BACKUP_DIR=/home/file-manager/backups
+DATABASE_BACKUP_KEEP=7
 MAX_UPLOAD_MB=100
 COOKIE_SECURE=false
 ```
@@ -175,7 +180,8 @@ COOKIE_SECURE=false
 6. 当前系统删除是硬删除。后续如需要更安全的数据治理，应增加软删除、恢复和删除审批能力。
 7. 当前预览功能是轻量实现，PDF、图片、文本支持在线预览；Office 文档在线预览需要额外转换组件，暂未引入。
 8. 当前部署是 HTTP + IP + 9000 端口。正式对外使用时建议增加域名、Nginx 反向代理和 HTTPS。
-9. 当前 SQLite 和上传文件都在服务器本地磁盘，需要定期备份 `/home/file-manager/data`。
+9. 当前提供的备份脚本只备份 SQLite 数据库，不包含 `/home/file-manager/data/uploads`；这是当前明确范围，上传文件如需容灾必须另行制定策略。
+10. 数据库备份脚本需要通过 cron 或其他调度方式定期执行，并监控执行日志和服务器剩余空间。
 
 ## 常用运维命令
 
@@ -217,12 +223,17 @@ git pull
 sudo systemctl restart file-manager
 ```
 
-备份数据：
+手工备份数据库并保留最近 7 份：
 
 ```bash
 cd /home/file-manager
-tar -czf file-manager-data-backup.tar.gz data
+/home/file-manager/.venv/bin/python scripts/backup_database.py \
+  --database /home/file-manager/data/file_manager.sqlite3 \
+  --output-dir /home/file-manager/backups \
+  --keep 7
 ```
+
+注意：上述命令只备份数据库，不备份上传文件。
 
 ## 后续开发方向
 
@@ -233,7 +244,7 @@ tar -czf file-manager-data-backup.tar.gz data
 - 增加统一错误处理。
 - 根据实际使用反馈完善文件级权限申请，例如权限撤销、有效期和审批历史查询。
 - 完善删除/归档策略，增加软删除、恢复和删除审批能力。
-- 增加数据备份和恢复脚本。
+- 增加数据库备份执行监控；如需求变化，再单独设计上传文件备份和恢复方案。
 - 优化部署文档，使 README 与当前 systemd 部署方式保持一致。
 
 开发原则：

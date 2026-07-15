@@ -44,12 +44,13 @@ from repositories.document_repository import (
 )
 from repositories.user_repository import (
     USER_PAGE_SIZE,
-    count_admin_users,
+    count_active_admin_users,
     count_users,
     create_user,
     get_user_by_id,
     get_user_by_username,
     list_users,
+    update_user_active_status,
     update_user_admin_status,
     update_user_password,
 )
@@ -79,6 +80,7 @@ from services.permission_service import (
 from services.user_service import (
     validate_admin_status_change,
     validate_password_pair,
+    validate_user_active_status_change,
     validate_username,
 )
 
@@ -252,8 +254,9 @@ def login_response(user_id: int) -> RedirectResponse:
     return response
 
 
-def logout_response() -> RedirectResponse:
-    response = RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
+def logout_response(error: str = "") -> RedirectResponse:
+    target = f"/login?{urlencode({'error': error})}" if error else "/login"
+    response = RedirectResponse(url=target, status_code=status.HTTP_303_SEE_OTHER)
     response.delete_cookie(SESSION_COOKIE)
     return response
 
@@ -265,15 +268,18 @@ def get_current_user(request: Request) -> dict[str, Any]:
     user_id = unsign_value(cookie_value)
     if not user_id:
         raise HTTPException(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": "/login"})
+    try:
+        parsed_user_id = int(user_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": "/login"}) from None
     with get_db() as conn:
-        user = row_to_dict(
-            conn.execute(
-                "SELECT id, username, is_admin, created_at FROM users WHERE id = ?",
-                (user_id,),
-            ).fetchone()
-        )
+        user = row_to_dict(get_user_by_id(conn, parsed_user_id))
     if not user:
         raise HTTPException(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": "/login"})
+    if not user["is_active"]:
+        log_audit_action(request, user, "session_denied", "account_disabled")
+        location = f"/logout?{urlencode({'error': '账号已停用，请联系管理员'})}"
+        raise HTTPException(status_code=status.HTTP_303_SEE_OTHER, headers={"Location": location})
     return user
 
 
@@ -320,6 +326,7 @@ def init_db() -> None:
                 username TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
             );
 
@@ -367,6 +374,8 @@ def init_db() -> None:
         user_columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "is_admin" not in user_columns:
             conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+        if "is_active" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
 
         category_columns = {row["name"] for row in conn.execute("PRAGMA table_info(categories)").fetchall()}
         if "parent_id" not in category_columns:
@@ -407,30 +416,42 @@ def home() -> RedirectResponse:
 
 
 @app.get("/login")
-def login_page(request: Request) -> Response:
-    return templates.TemplateResponse("login.html", {"request": request, "error": ""})
+def login_page(request: Request, error: str = "") -> Response:
+    return templates.TemplateResponse("login.html", {"request": request, "error": error})
 
 
 @app.post("/login")
 def login(request: Request, username: str = Form(...), password: str = Form(...)) -> Response:
+    cleaned_username = username.strip()
     with get_db() as conn:
-        user = conn.execute(
-            "SELECT id, username, password_hash FROM users WHERE username = ?",
-            (username.strip(),),
-        ).fetchone()
+        user = get_user_by_username(conn, cleaned_username)
     if not user or not verify_password(password, user["password_hash"]):
+        audit_username = cleaned_username.replace("\r", "").replace("\n", "")[:50] or "unknown"
+        log_audit_action(
+            request,
+            {"username": audit_username},
+            "login",
+            "failed_invalid_credentials",
+        )
         return templates.TemplateResponse(
             "login.html",
             {"request": request, "error": "用户名或密码不正确"},
             status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+    if not user["is_active"]:
+        log_audit_action(request, dict(user), "login", "denied_account_disabled")
+        return templates.TemplateResponse(
+            "login.html",
+            {"request": request, "error": "账号已停用，请联系管理员"},
+            status_code=status.HTTP_403_FORBIDDEN,
         )
     log_audit_action(request, {"username": user["username"]}, "login", "success")
     return login_response(user["id"])
 
 
 @app.get("/logout")
-def logout() -> RedirectResponse:
-    return logout_response()
+def logout(error: str = "") -> RedirectResponse:
+    return logout_response(error)
 
 
 def account_template(
@@ -586,7 +607,7 @@ def update_managed_user_admin(
         if not target_user:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
         try:
-            validate_admin_status_change(target_user, new_is_admin, count_admin_users(conn))
+            validate_admin_status_change(target_user, new_is_admin, count_active_admin_users(conn))
         except ValueError as exc:
             return account_template(
                 request,
@@ -608,6 +629,49 @@ def update_managed_user_admin(
     if target_user_id == user["id"]:
         response_user["is_admin"] = int(new_is_admin)
     return account_template(request, response_user, success="权限已更新", user_page=user_page)
+
+
+@app.post("/account/users/{target_user_id}/active")
+def update_managed_user_active(
+    request: Request,
+    target_user_id: int,
+    is_active: str = Form("0"),
+    user_page: int = Form(1),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> Response:
+    require_admin_user(user)
+    new_is_active = is_active == "1"
+
+    with get_db() as conn:
+        target_user = get_user_by_id(conn, target_user_id)
+        if not target_user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        try:
+            validate_user_active_status_change(
+                target_user,
+                user["id"],
+                new_is_active,
+                count_active_admin_users(conn),
+            )
+        except ValueError as exc:
+            return account_template(
+                request,
+                user,
+                error=str(exc),
+                response_status=status.HTTP_400_BAD_REQUEST,
+                user_page=user_page,
+            )
+        update_user_active_status(conn, target_user_id, new_is_active)
+        conn.commit()
+
+    log_audit_action(
+        request,
+        user,
+        "update_user_status",
+        f"user_id={target_user_id}; is_active={int(new_is_active)}",
+    )
+    message = "账号已启用" if new_is_active else "账号已停用"
+    return account_template(request, user, success=message, user_page=user_page)
 
 
 @app.get("/dashboard")

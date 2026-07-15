@@ -1141,6 +1141,27 @@ td:last-child {
   padding: 0 12px;
 }
 
+.user-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 2px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.user-status.is-active {
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+}
+
+.user-status.is-disabled {
+  background: var(--disabled-bg);
+  color: var(--muted);
+}
+
 .document-readonly-info {
   margin: 0;
   display: grid;

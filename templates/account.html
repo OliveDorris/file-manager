@@ -129,6 +129,7 @@
           <tr>
             <th>用户名</th>
             <th>权限</th>
+            <th>状态</th>
             <th>创建时间</th>
             <th>操作</th>
           </tr>
@@ -138,6 +139,11 @@
             <tr>
               <td>{{ managed_user.username }}</td>
               <td>{{ "管理员" if managed_user.is_admin else "普通用户" }}</td>
+              <td>
+                <span class="user-status {{ 'is-active' if managed_user.is_active else 'is-disabled' }}">
+                  {{ "已启用" if managed_user.is_active else "已停用" }}
+                </span>
+              </td>
               <td>{{ managed_user.created_at[:19].replace("T", " ") }}</td>
               <td class="actions">
                 <form method="post" action="/account/users/{{ managed_user.id }}/admin" class="inline-form">
@@ -148,11 +154,21 @@
                   </select>
                   <button type="submit" class="small-button">保存</button>
                 </form>
+                <form method="post" action="/account/users/{{ managed_user.id }}/active" class="inline-form"
+                      {% if managed_user.is_active %}onsubmit="return confirm('确认停用该用户？');"{% endif %}>
+                  <input type="hidden" name="user_page" value="{{ user_pagination.page }}">
+                  <input type="hidden" name="is_active" value="{{ '0' if managed_user.is_active else '1' }}">
+                  <button type="submit"
+                          class="small-button {{ 'danger-button' if managed_user.is_active else 'secondary-button' }}"
+                          {% if managed_user.id == user.id and managed_user.is_active %}disabled title="不能停用当前登录账号"{% endif %}>
+                    {{ "停用" if managed_user.is_active else "启用" }}
+                  </button>
+                </form>
               </td>
             </tr>
           {% else %}
             <tr>
-              <td colspan="4" class="empty">暂无用户</td>
+              <td colspan="5" class="empty">暂无用户</td>
             </tr>
           {% endfor %}
         </tbody>

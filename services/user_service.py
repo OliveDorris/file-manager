@@ -30,7 +30,29 @@ def validate_password_pair(password: str, confirm_password: str) -> str:
 def validate_admin_status_change(
     target_user: sqlite3.Row,
     new_is_admin: bool,
-    admin_count: int,
+    active_admin_count: int,
 ) -> None:
-    if bool(target_user["is_admin"]) and not new_is_admin and admin_count <= 1:
+    if (
+        bool(target_user["is_admin"])
+        and bool(target_user["is_active"])
+        and not new_is_admin
+        and active_admin_count <= 1
+    ):
         raise ValueError("至少需要保留一个管理员")
+
+
+def validate_user_active_status_change(
+    target_user: sqlite3.Row,
+    current_user_id: int,
+    new_is_active: bool,
+    active_admin_count: int,
+) -> None:
+    if not new_is_active and int(target_user["id"]) == current_user_id:
+        raise ValueError("不能停用当前登录账号")
+    if (
+        bool(target_user["is_admin"])
+        and bool(target_user["is_active"])
+        and not new_is_active
+        and active_admin_count <= 1
+    ):
+        raise ValueError("至少需要保留一个已启用的管理员")

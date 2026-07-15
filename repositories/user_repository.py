@@ -18,21 +18,21 @@ def list_users(
 ) -> list[sqlite3.Row]:
     offset = (max(page, 1) - 1) * page_size
     return conn.execute(
-        "SELECT id, username, is_admin, created_at FROM users ORDER BY id LIMIT ? OFFSET ?",
+        "SELECT id, username, is_admin, is_active, created_at FROM users ORDER BY id LIMIT ? OFFSET ?",
         (page_size, offset),
     ).fetchall()
 
 
 def get_user_by_id(conn: sqlite3.Connection, user_id: int) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT id, username, password_hash, is_admin, created_at FROM users WHERE id = ?",
+        "SELECT id, username, password_hash, is_admin, is_active, created_at FROM users WHERE id = ?",
         (user_id,),
     ).fetchone()
 
 
 def get_user_by_username(conn: sqlite3.Connection, username: str) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT id, username, password_hash, is_admin, created_at FROM users WHERE username = ?",
+        "SELECT id, username, password_hash, is_admin, is_active, created_at FROM users WHERE username = ?",
         (username,),
     ).fetchone()
 
@@ -62,6 +62,17 @@ def update_user_admin_status(conn: sqlite3.Connection, user_id: int, is_admin: b
     conn.execute("UPDATE users SET is_admin = ? WHERE id = ?", (int(is_admin), user_id))
 
 
+def update_user_active_status(conn: sqlite3.Connection, user_id: int, is_active: bool) -> None:
+    conn.execute("UPDATE users SET is_active = ? WHERE id = ?", (int(is_active), user_id))
+
+
 def count_admin_users(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT COUNT(*) AS total FROM users WHERE is_admin = 1").fetchone()
+    return int(row["total"])
+
+
+def count_active_admin_users(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS total FROM users WHERE is_admin = 1 AND is_active = 1"
+    ).fetchone()
     return int(row["total"])

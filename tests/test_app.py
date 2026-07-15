@@ -403,6 +403,68 @@ def test_admin_user_can_manage_account_users(tmp_path, monkeypatch):
     assert managed_user["is_admin"] == 1
 
 
+def test_admin_can_disable_and_enable_regular_user(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    admin = admin_user()
+    managed_user = create_test_user("managed-user")
+    client = authenticated_client(admin["id"])
+
+    disable_response = client.post(
+        f"/account/users/{managed_user['id']}/active",
+        data={"is_active": "0", "user_page": "1"},
+    )
+
+    assert disable_response.status_code == 200
+    assert "账号已停用" in disable_response.text
+    with app.get_db() as conn:
+        disabled_user = app.get_user_by_id(conn, managed_user["id"])
+    assert disabled_user["is_active"] == 0
+
+    login_response = TestClient(app.app).post(
+        "/login",
+        data={"username": "managed-user", "password": "Password123"},
+    )
+    assert login_response.status_code == 403
+    assert "账号已停用，请联系管理员" in login_response.text
+
+    disabled_client = authenticated_client(managed_user["id"])
+    session_response = disabled_client.get("/dashboard", follow_redirects=False)
+    assert session_response.status_code == 303
+    assert session_response.headers["location"].startswith("/logout?error=")
+
+    enable_response = client.post(
+        f"/account/users/{managed_user['id']}/active",
+        data={"is_active": "1", "user_page": "1"},
+    )
+    assert enable_response.status_code == 200
+    assert "账号已启用" in enable_response.text
+
+    active_login = TestClient(app.app).post(
+        "/login",
+        data={"username": "managed-user", "password": "Password123"},
+        follow_redirects=False,
+    )
+    assert active_login.status_code == 303
+    assert active_login.headers["location"] == "/dashboard"
+
+
+def test_admin_cannot_disable_current_account(tmp_path, monkeypatch):
+    configure_temp_app(tmp_path, monkeypatch)
+    admin = admin_user()
+    client = authenticated_client(admin["id"])
+
+    response = client.post(
+        f"/account/users/{admin['id']}/active",
+        data={"is_active": "0", "user_page": "1"},
+    )
+
+    assert response.status_code == 400
+    assert "不能停用当前登录账号" in response.text
+    with app.get_db() as conn:
+        current_admin = app.get_user_by_id(conn, admin["id"])
+    assert current_admin["is_active"] == 1
+
+
 def test_admin_user_list_paginates_to_ten_users(tmp_path, monkeypatch):
     configure_temp_app(tmp_path, monkeypatch)
     user = admin_user()
@@ -654,6 +716,44 @@ def test_existing_category_table_is_migrated_with_parent_id(tmp_path, monkeypatc
 
     assert "parent_id" in columns
     assert legacy_category["parent_id"] is None
+
+
+def test_existing_user_table_is_migrated_with_active_status(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    database_path = data_dir / "file_manager.sqlite3"
+    with sqlite3.connect(database_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO users (username, password_hash, is_admin, created_at)
+            VALUES (?, ?, 1, ?)
+            """,
+            ("admin", app.password_hash("admin123456"), app.now_iso()),
+        )
+        conn.commit()
+
+    monkeypatch.setattr(app, "DATA_DIR", data_dir)
+    monkeypatch.setattr(app, "UPLOAD_DIR", data_dir / "uploads")
+    monkeypatch.setattr(app, "DB_PATH", database_path)
+    app.init_db()
+
+    with app.get_db() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        migrated_admin = app.get_user_by_username(conn, "admin")
+
+    assert "is_active" in columns
+    assert migrated_admin["is_active"] == 1
 
 
 def test_nested_categories_are_limited_to_three_levels(tmp_path, monkeypatch):

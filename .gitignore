@@ -3,4 +3,5 @@ __pycache__/
 .env
 .venv/
 data/
+backups/
 .pytest_cache/
