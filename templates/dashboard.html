@@ -83,18 +83,20 @@
         <p class="eyebrow">Documents</p>
         <h1>文件列表</h1>
       </div>
-      <a class="button-link secondary-button" href="/recycle-bin">回收站</a>
-      <form method="get" action="/dashboard" class="search-form">
-        {% if active_category_id %}
-          <input type="hidden" name="category_id" value="{{ active_category_id }}">
-        {% endif %}
-        <div class="search-field">
-          <input type="search" name="q" value="{{ q }}" placeholder="搜索文件名或标题">
-          <button type="submit" class="search-inline-button" aria-label="搜索" title="搜索">
-            <span aria-hidden="true">&#128269;</span>
-          </button>
-        </div>
-      </form>
+      <div class="section-head-actions">
+        <a class="button-link secondary-button" href="/recycle-bin">回收站</a>
+        <form method="get" action="/dashboard" class="search-form">
+          {% if active_category_id %}
+            <input type="hidden" name="category_id" value="{{ active_category_id }}">
+          {% endif %}
+          <div class="search-field">
+            <input type="search" name="q" value="{{ q }}" placeholder="搜索文件名或标题">
+            <button type="submit" class="search-inline-button" aria-label="搜索" title="搜索">
+              <span aria-hidden="true">&#128269;</span>
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
 
     {% if error %}
@@ -171,9 +173,9 @@
                   <a href="/documents/{{ document.id }}">{{ document.title }}</a>
                   {% set search_context = search_contexts.get(document.id) %}
                   {% if search_context %}
-                    <div class="muted search-hit-label">{{ "标题命中" if search_context.hit == "title" else "内容命中" }}</div>
+                    <div class="search-hit-label {{ 'is-content' if search_context.hit == 'content' }}">{{ "标题命中" if search_context.hit == "title" else "内容命中" }}</div>
                     {% if search_context.snippet %}
-                      <div class="muted search-snippet">{{ search_context.snippet }}</div>
+                      <div class="search-snippet">{{ search_context.snippet }}</div>
                     {% endif %}
                   {% endif %}
                 </td>

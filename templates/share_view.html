@@ -1,15 +1,13 @@
 {% extends "base.html" %}
 {% set title = share.document_title ~ " - 分享预览 - 文件管理系统" %}
 {% block content %}
-<section class="preview-layout">
-  <div class="section-head">
-    <div>
-      <p class="eyebrow">Shared</p>
-      <h1>{{ share.document_title }}</h1>
-      <p class="muted">通过分享链接访问 · {{ version.original_filename }}</p>
-    </div>
+<section class="share-layout">
+  <div class="share-card">
+    <p class="eyebrow">Shared</p>
+    <h1>{{ share.document_title }}</h1>
+    <p class="muted">通过分享链接访问 · {{ version.original_filename }}</p>
     {% if share.allow_download %}
-      <div class="button-row">
+      <div class="share-card-actions">
         <a class="button-link" href="/share/{{ token }}/download">下载文件</a>
       </div>
     {% endif %}

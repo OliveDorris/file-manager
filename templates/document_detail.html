@@ -96,7 +96,7 @@
     {% if document.can_manage %}
       <section class="table-wrap">
         <h2>分享链接</h2>
-        <form method="post" action="/documents/{{ document.id }}/shares" class="upload-form">
+        <form method="post" action="/documents/{{ document.id }}/shares" class="share-form">
           <label>
             <span>访问密码（可空）</span>
             <input type="text" name="password" autocomplete="off" placeholder="不填则免密码访问">
@@ -134,7 +134,7 @@
           <tbody>
             {% for share in share_links %}
               <tr>
-                <td>/share/{{ share.token }}</td>
+                <td class="share-token">/share/{{ share.token }}</td>
                 <td>{{ "有" if share.password_hash else "无" }}</td>
                 <td>{{ share.expires_at[:19].replace("T", " ") if share.expires_at else "永久" }}</td>
                 <td>{{ "允许下载" if share.allow_download else "仅预览" }}</td>

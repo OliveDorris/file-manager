@@ -19,6 +19,7 @@
   </div>
 
   <section class="table-wrap account-table">
+    <h2>已删除的文件</h2>
     <table>
       <thead>
         <tr>
@@ -54,11 +55,14 @@
       </tbody>
     </table>
     {% if documents %}
-      <div class="button-row">
-        <form method="post" action="/recycle-bin/clear"
-              onsubmit="return confirm('将彻底删除回收站中的全部文件，确认继续？');">
-          <button type="submit" class="danger-button">清空回收站</button>
-        </form>
+      <div class="batch-actions">
+        <span class="batch-actions-hint">彻底删除后无法恢复，请谨慎操作</span>
+        <div class="batch-actions-buttons">
+          <form method="post" action="/recycle-bin/clear"
+                onsubmit="return confirm('将彻底删除回收站中的全部文件，确认继续？');">
+            <button type="submit" class="danger-button">清空回收站</button>
+          </form>
+        </div>
       </div>
     {% endif %}
   </section>
