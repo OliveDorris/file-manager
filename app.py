@@ -7,17 +7,28 @@ import os
 import secrets
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from repositories.audit_log_repository import (
+    AUDIT_LOG_PAGE_SIZE,
+    count_audit_logs,
+    initialize_audit_log_schema,
+    insert_audit_log,
+    list_audit_actions,
+    list_audit_logs,
+)
 from repositories.category_repository import (
     count_child_categories,
     count_documents_in_category,
@@ -25,22 +36,31 @@ from repositories.category_repository import (
     get_category,
 )
 from repositories.access_request_repository import (
+    ACCESS_REQUEST_PAGE_SIZE,
+    count_access_requests,
     count_pending_access_requests,
     initialize_access_request_schema,
+    list_access_requests,
     list_pending_access_requests,
 )
 from repositories.document_repository import (
     DOCUMENT_PAGE_SIZE,
     count_documents,
-    delete_documents_by_ids,
     get_current_version,
     get_document_detail,
     get_version,
     list_categories,
     list_current_versions_for_documents,
+    list_deleted_documents,
     list_document_versions,
     list_documents_by_ids,
     list_documents,
+    restore_document,
+    soft_delete_documents_by_ids,
+)
+from repositories.share_link_repository import (
+    initialize_share_link_schema,
+    list_share_links_for_document,
 )
 from repositories.user_repository import (
     USER_PAGE_SIZE,
@@ -60,22 +80,46 @@ from services.category_service import (
     flatten_category_tree,
     validate_category_can_delete,
 )
+from services.audit_service import configure_audit_file_handler
+from services.backup_status_service import build_backup_overview
 from services.document_service import (
     build_batch_download_zip,
     parse_selected_document_ids,
-    remove_document_files,
-    remove_many_document_files,
 )
 from services.preview_service import build_preview_context
 from services.permission_service import (
     ACTION_DOWNLOAD,
     ACTION_UPLOAD_VERSION,
     access_action_label,
+    access_status_label,
     build_document_access_flags,
     build_document_access_flags_one,
+    is_grant_expired,
+    parse_validity_days,
     review_access_request,
+    revoke_access_request_grant,
     submit_access_request,
     submit_download_access_requests,
+)
+from services.recycle_bin_service import (
+    can_recycle_document,
+    purge_documents_completely,
+    purge_retention_expired_documents,
+    recycle_retention_days,
+)
+from services.search_service import (
+    build_search_contexts,
+    configure_search,
+    find_matching_document_ids,
+    index_document,
+    remove_document_index,
+)
+from services.share_service import (
+    create_document_share_link,
+    get_active_share_link,
+    revoke_document_share_link,
+    share_link_status_label,
+    verify_share_password,
 )
 from services.user_service import (
     validate_admin_status_change,
@@ -104,6 +148,69 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 
+DEFAULT_ERROR_MESSAGES = {
+    status.HTTP_400_BAD_REQUEST: "请求无效，请检查后重试。",
+    status.HTTP_403_FORBIDDEN: "没有权限执行此操作。",
+    status.HTTP_404_NOT_FOUND: "请求的页面或资源不存在。",
+    status.HTTP_405_METHOD_NOT_ALLOWED: "请求方式不支持。",
+    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE: "文件大小超出限制。",
+    status.HTTP_422_UNPROCESSABLE_ENTITY: "请求参数无效，请检查后重试。",
+    status.HTTP_500_INTERNAL_SERVER_ERROR: "服务器内部错误，请稍后重试。",
+}
+
+
+def wants_json_response(request: Request) -> bool:
+    if request.url.path.startswith("/api"):
+        return True
+    accept = request.headers.get("accept", "")
+    return "application/json" in accept and "text/html" not in accept
+
+
+def render_error_page(request: Request, status_code: int, message: str = "") -> Response:
+    return templates.TemplateResponse(
+        "error.html",
+        {
+            "request": request,
+            "status_code": status_code,
+            "message": message or DEFAULT_ERROR_MESSAGES.get(status_code, "请求处理失败，请稍后重试。"),
+        },
+        status_code=status_code,
+    )
+
+
+@app.exception_handler(HTTPException)
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> Response:
+    if exc.headers and "Location" in exc.headers:
+        return Response(status_code=exc.status_code, headers=exc.headers)
+    if wants_json_response(request):
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers)
+    message = exc.detail if isinstance(exc.detail, str) else ""
+    return render_error_page(request, exc.status_code, message)
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(request: Request, exc: RequestValidationError) -> Response:
+    logger.warning("Request validation failed: path=%s errors=%s", request.url.path, exc.errors())
+    if wants_json_response(request):
+        return JSONResponse(
+            {"detail": jsonable_encoder(exc.errors())},
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
+    return render_error_page(request, status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> Response:
+    logger.exception("Unhandled error: path=%s", request.url.path)
+    if wants_json_response(request):
+        return JSONResponse(
+            {"detail": "Internal server error"},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+    return render_error_page(request, status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -127,14 +234,46 @@ def client_ip(request: Request) -> str:
 
 
 def log_audit_action(request: Request, user: dict[str, Any], operation: str, target: str) -> None:
+    username = user.get("username", "unknown")
+    ip = client_ip(request)
+    timestamp = now_iso()
     audit_logger.info(
         "user=%s time=%s ip=%s operation=%s target=%s",
-        user.get("username", "unknown"),
-        now_iso(),
-        client_ip(request),
+        username,
+        timestamp,
+        ip,
         operation,
         target,
     )
+    try:
+        with get_db() as conn:
+            insert_audit_log(conn, str(username), ip, operation, target, timestamp)
+            conn.commit()
+    except Exception:
+        logger.exception(
+            "审计日志写入数据库失败：user=%s operation=%s target=%s",
+            username,
+            operation,
+            target,
+        )
+
+
+def sync_document_index(document_id: int) -> None:
+    try:
+        with get_db() as conn:
+            index_document(conn, UPLOAD_DIR, document_id)
+            conn.commit()
+    except Exception:
+        logger.exception("全文索引更新失败：document_id=%s", document_id)
+
+
+def remove_document_from_index(document_id: int) -> None:
+    try:
+        with get_db() as conn:
+            remove_document_index(conn, document_id)
+            conn.commit()
+    except Exception:
+        logger.exception("全文索引移除失败：document_id=%s", document_id)
 
 
 def parse_optional_int(value: str | None) -> int | None:
@@ -318,6 +457,7 @@ def save_upload(upload: UploadFile, document_id: int, version_number: int) -> tu
 def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    configure_audit_file_handler(DATA_DIR)
     with get_db() as conn:
         conn.executescript(
             """
@@ -370,6 +510,8 @@ def init_db() -> None:
             """
         )
         initialize_access_request_schema(conn)
+        initialize_audit_log_schema(conn)
+        initialize_share_link_schema(conn)
 
         user_columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "is_admin" not in user_columns:
@@ -382,6 +524,10 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE categories ADD COLUMN parent_id INTEGER REFERENCES categories(id) ON DELETE RESTRICT"
             )
+
+        document_columns = {row["name"] for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
+        if "deleted_at" not in document_columns:
+            conn.execute("ALTER TABLE documents ADD COLUMN deleted_at TEXT")
 
         admin_username = os.getenv("ADMIN_USERNAME", "admin")
         admin_password = os.getenv("ADMIN_PASSWORD", "admin123456")
@@ -402,6 +548,7 @@ def init_db() -> None:
                 "INSERT OR IGNORE INTO categories (name, description, created_at) VALUES (?, '', ?)",
                 (name, now_iso()),
             )
+        configure_search(conn, UPLOAD_DIR)
         conn.commit()
 
 
@@ -454,6 +601,10 @@ def logout(error: str = "") -> RedirectResponse:
     return logout_response(error)
 
 
+def backup_status_path() -> Path:
+    return Path(os.getenv("BACKUP_STATUS_FILE", str(DATA_DIR / "backup_status.json")))
+
+
 def account_template(
     request: Request,
     user: dict[str, Any],
@@ -466,6 +617,7 @@ def account_template(
     pending_access_requests = []
     pending_request_count = 0
     user_pagination: dict[str, Any] = {}
+    backup_overview: dict[str, Any] | None = None
     if is_admin_user(user):
         with get_db() as conn:
             total_count = count_users(conn)
@@ -474,6 +626,7 @@ def account_template(
             managed_users = list_users(conn, current_page)
             pending_access_requests = list_pending_access_requests(conn)
             pending_request_count = count_pending_access_requests(conn)
+        backup_overview = build_backup_overview(backup_status_path(), DATA_DIR)
         user_pagination = {
             "page": current_page,
             "page_size": USER_PAGE_SIZE,
@@ -492,6 +645,7 @@ def account_template(
             "pending_request_count": pending_request_count,
             "access_action_label": access_action_label,
             "user_pagination": user_pagination,
+            "backup_overview": backup_overview,
             "success": success,
             "error": error,
         },
@@ -674,6 +828,76 @@ def update_managed_user_active(
     return account_template(request, user, success=message, user_page=user_page)
 
 
+def audit_logs_url(
+    username: str,
+    action: str,
+    start_date: str,
+    end_date: str,
+    page: int,
+) -> str:
+    params: list[tuple[str, str]] = []
+    if username.strip():
+        params.append(("user", username.strip()))
+    if action.strip():
+        params.append(("action", action.strip()))
+    if start_date.strip():
+        params.append(("start", start_date.strip()))
+    if end_date.strip():
+        params.append(("end", end_date.strip()))
+    if page > 1:
+        params.append(("page", str(page)))
+    query = urlencode(params)
+    return f"/admin/audit-logs?{query}" if query else "/admin/audit-logs"
+
+
+@app.get("/admin/audit-logs")
+def audit_logs_page(
+    request: Request,
+    username: str = Query("", alias="user"),
+    action: str = "",
+    start: str = "",
+    end: str = "",
+    page: int = 1,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> Response:
+    require_admin_user(user)
+
+    with get_db() as conn:
+        total_count = count_audit_logs(conn, username, action, start, end)
+        total_pages = max(1, (total_count + AUDIT_LOG_PAGE_SIZE - 1) // AUDIT_LOG_PAGE_SIZE)
+        current_page = min(max(page, 1), total_pages)
+        audit_logs = list_audit_logs(conn, current_page, username, action, start, end)
+        action_options = list_audit_actions(conn)
+        pending_request_count = count_pending_access_requests(conn)
+
+    filters = {"user": username, "action": action, "start": start, "end": end}
+    pagination = {
+        "page": current_page,
+        "page_size": AUDIT_LOG_PAGE_SIZE,
+        "total_count": total_count,
+        "total_pages": total_pages,
+        "previous_url": audit_logs_url(username, action, start, end, current_page - 1)
+        if current_page > 1
+        else "",
+        "next_url": audit_logs_url(username, action, start, end, current_page + 1)
+        if current_page < total_pages
+        else "",
+    }
+
+    return templates.TemplateResponse(
+        "audit_logs.html",
+        {
+            "request": request,
+            "user": user,
+            "audit_logs": audit_logs,
+            "action_options": action_options,
+            "filters": filters,
+            "pagination": pagination,
+            "pending_request_count": pending_request_count,
+        },
+    )
+
+
 @app.get("/dashboard")
 def dashboard(
     request: Request,
@@ -688,13 +912,19 @@ def dashboard(
     requested_page = max(page, 1)
 
     with get_db() as conn:
-        total_count = count_documents(conn, category_id, cleaned_query)
+        matched_ids = find_matching_document_ids(conn, cleaned_query)
+        total_count = count_documents(conn, category_id, cleaned_query, matched_ids)
         total_pages = max(1, (total_count + DOCUMENT_PAGE_SIZE - 1) // DOCUMENT_PAGE_SIZE)
         current_page = min(requested_page, total_pages)
         documents = build_document_access_flags(
             conn,
             user,
-            list_documents(conn, category_id, cleaned_query, current_page),
+            list_documents(conn, category_id, cleaned_query, current_page, matched_ids=matched_ids),
+        )
+        search_contexts = (
+            build_search_contexts(conn, [document["id"] for document in documents], cleaned_query)
+            if matched_ids is not None
+            else {}
         )
         categories = list_categories(conn)
         category_tree = build_category_tree(categories, category_id)
@@ -718,6 +948,7 @@ def dashboard(
             "request": request,
             "user": user,
             "documents": documents,
+            "search_contexts": search_contexts,
             "category_tree": category_tree,
             "category_options": category_options,
             "pending_request_count": pending_request_count,
@@ -877,6 +1108,7 @@ def upload_document(
         )
         conn.commit()
 
+    sync_document_index(document_id)
     return RedirectResponse(url=f"/documents/{document_id}", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -1008,10 +1240,15 @@ async def batch_delete_documents(
                 url=dashboard_url_from_form(form, error="只能删除自己上传的文件。"),
                 status_code=status.HTTP_303_SEE_OTHER,
             )
-        deleted_count = delete_documents_by_ids(conn, [document["id"] for document in documents])
+        deleted_count = soft_delete_documents_by_ids(
+            conn,
+            [document["id"] for document in documents],
+            now_iso(),
+        )
         conn.commit()
 
-    remove_many_document_files(UPLOAD_DIR, [document["id"] for document in documents])
+    for document in documents:
+        remove_document_from_index(document["id"])
     log_audit_action(
         request,
         user,
@@ -1063,11 +1300,46 @@ def request_document_access(
     )
 
 
+@app.post("/access-requests/{request_id}/revoke")
+def revoke_access_request_route(
+    request: Request,
+    request_id: int,
+    return_to: str = Form("/access-requests"),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> RedirectResponse:
+    with get_db() as conn:
+        try:
+            access_request = revoke_access_request_grant(conn, request_id, user, now_iso())
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+        except ValueError as exc:
+            return RedirectResponse(
+                url=local_url_with_message(return_to, error=str(exc)),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        conn.commit()
+
+    log_audit_action(
+        request,
+        user,
+        "revoke_access_request",
+        (
+            f"request_id={request_id}; requester_id={access_request['requester_id']}; "
+            f"document_id={access_request['document_id']}; action={access_request['action']}"
+        ),
+    )
+    return RedirectResponse(
+        url=local_url_with_message(return_to, success="权限已撤销"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
 @app.post("/access-requests/{request_id}/{decision}")
 def decide_access_request(
     request: Request,
     request_id: int,
     decision: str,
+    validity: str = Form(""),
     user: dict[str, Any] = Depends(get_current_user),
 ) -> RedirectResponse:
     require_admin_user(user)
@@ -1075,6 +1347,18 @@ def decide_access_request(
     normalized_decision = decision_map.get(decision)
     if not normalized_decision:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review action not found")
+
+    expires_at = None
+    if normalized_decision == "approved":
+        try:
+            validity_days = parse_validity_days(validity)
+        except ValueError as exc:
+            return RedirectResponse(
+                url=local_url_with_message("/account#access-requests", error=str(exc)),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        if validity_days:
+            expires_at = (datetime.now(timezone.utc) + timedelta(days=validity_days)).isoformat(timespec="seconds")
 
     with get_db() as conn:
         try:
@@ -1084,6 +1368,7 @@ def decide_access_request(
                 int(user["id"]),
                 normalized_decision,
                 now_iso(),
+                expires_at,
             )
         except ValueError as exc:
             return RedirectResponse(
@@ -1099,12 +1384,185 @@ def decide_access_request(
         operation,
         (
             f"request_id={request_id}; requester_id={access_request['requester_id']}; "
-            f"document_id={access_request['document_id']}; action={access_request['action']}"
+            f"document_id={access_request['document_id']}; action={access_request['action']}; "
+            f"expires_at={expires_at or 'permanent'}"
         ),
     )
     result_text = "已接受" if normalized_decision == "approved" else "已拒绝"
     return RedirectResponse(
         url=local_url_with_message("/account#access-requests", success=f"申请{result_text}"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+def access_requests_url(username: str, status_filter: str, page: int) -> str:
+    params: list[tuple[str, str]] = []
+    if username.strip():
+        params.append(("user", username.strip()))
+    if status_filter.strip():
+        params.append(("status", status_filter.strip()))
+    if page > 1:
+        params.append(("page", str(page)))
+    query = urlencode(params)
+    return f"/access-requests?{query}" if query else "/access-requests"
+
+
+@app.get("/access-requests")
+def access_requests_page(
+    request: Request,
+    username: str = Query("", alias="user"),
+    status_filter: str = Query("", alias="status"),
+    page: int = 1,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> Response:
+    admin = is_admin_user(user)
+    effective_username = username if admin else ""
+    scoped_user_id = None if admin else int(user["id"])
+
+    with get_db() as conn:
+        total_count = count_access_requests(conn, effective_username, status_filter, scoped_user_id)
+        total_pages = max(1, (total_count + ACCESS_REQUEST_PAGE_SIZE - 1) // ACCESS_REQUEST_PAGE_SIZE)
+        current_page = min(max(page, 1), total_pages)
+        access_requests = list_access_requests(conn, current_page, effective_username, status_filter, scoped_user_id)
+        pending_request_count = count_pending_access_requests(conn) if admin else 0
+
+    filters = {"user": effective_username, "status": status_filter}
+    pagination = {
+        "page": current_page,
+        "page_size": ACCESS_REQUEST_PAGE_SIZE,
+        "total_count": total_count,
+        "total_pages": total_pages,
+        "previous_url": access_requests_url(effective_username, status_filter, current_page - 1)
+        if current_page > 1
+        else "",
+        "next_url": access_requests_url(effective_username, status_filter, current_page + 1)
+        if current_page < total_pages
+        else "",
+    }
+
+    return templates.TemplateResponse(
+        "access_requests.html",
+        {
+            "request": request,
+            "user": user,
+            "access_requests": access_requests,
+            "filters": filters,
+            "pagination": pagination,
+            "pending_request_count": pending_request_count,
+            "access_action_label": access_action_label,
+            "access_status_label": access_status_label,
+            "is_grant_expired": is_grant_expired,
+            "now": now_iso(),
+        },
+    )
+
+
+@app.get("/recycle-bin")
+def recycle_bin_page(
+    request: Request,
+    success: str = "",
+    error: str = "",
+    user: dict[str, Any] = Depends(get_current_user),
+) -> Response:
+    admin = is_admin_user(user)
+    retention_days = recycle_retention_days()
+
+    with get_db() as conn:
+        if retention_days > 0:
+            purged_expired = purge_retention_expired_documents(conn, UPLOAD_DIR, retention_days)
+            if purged_expired:
+                logger.info("回收站自动清理超期文件：count=%s retention_days=%s", purged_expired, retention_days)
+        documents = list_deleted_documents(conn, None if admin else int(user["id"]))
+        pending_request_count = count_pending_access_requests(conn) if admin else 0
+
+    return templates.TemplateResponse(
+        "recycle_bin.html",
+        {
+            "request": request,
+            "user": user,
+            "documents": documents,
+            "pending_request_count": pending_request_count,
+            "success": success,
+            "error": error,
+        },
+    )
+
+
+@app.post("/documents/{document_id}/restore")
+def restore_document_route(
+    request: Request,
+    document_id: int,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> RedirectResponse:
+    with get_db() as conn:
+        document = get_document_detail(conn, document_id, include_deleted=True)
+        if not document or not document["deleted_at"]:
+            return RedirectResponse(
+                url=local_url_with_message("/recycle-bin", error="文件不在回收站"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        if not can_recycle_document(user, document):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="只能恢复自己删除的文件",
+            )
+        restore_document(conn, document_id)
+        conn.commit()
+
+    sync_document_index(document_id)
+    log_audit_action(request, user, "restore_document", f"document_id={document_id}; title={document['title']}")
+    return RedirectResponse(
+        url=local_url_with_message("/recycle-bin", success="文件已恢复"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@app.post("/documents/{document_id}/purge")
+def purge_document_route(
+    request: Request,
+    document_id: int,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> RedirectResponse:
+    with get_db() as conn:
+        document = get_document_detail(conn, document_id, include_deleted=True)
+        if not document or not document["deleted_at"]:
+            return RedirectResponse(
+                url=local_url_with_message("/recycle-bin", error="文件不在回收站"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        if not can_recycle_document(user, document):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="只能彻底删除自己删除的文件",
+            )
+        purge_documents_completely(conn, UPLOAD_DIR, [document_id])
+
+    log_audit_action(request, user, "purge_document", f"document_id={document_id}; title={document['title']}")
+    return RedirectResponse(
+        url=local_url_with_message("/recycle-bin", success="文件已彻底删除"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@app.post("/recycle-bin/clear")
+def clear_recycle_bin(
+    request: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> RedirectResponse:
+    admin = is_admin_user(user)
+    with get_db() as conn:
+        documents = list_deleted_documents(conn, None if admin else int(user["id"]))
+        document_ids = [int(document["id"]) for document in documents]
+        purged_count = purge_documents_completely(conn, UPLOAD_DIR, document_ids)
+
+    log_audit_action(
+        request,
+        user,
+        "clear_recycle_bin",
+        f"count={purged_count}; scope={'all' if admin else 'own'}",
+    )
+    return RedirectResponse(
+        url=local_url_with_message("/recycle-bin", success=f"已彻底删除 {purged_count} 个文件"),
         status_code=status.HTTP_303_SEE_OTHER,
     )
 
@@ -1123,6 +1581,7 @@ def document_detail(
         categories = list_categories(conn)
         category_options = flatten_category_tree(build_category_tree(categories, document["category_id"]))
         pending_request_count = count_pending_access_requests(conn) if is_admin_user(user) else 0
+        share_links = list_share_links_for_document(conn, document_id) if document["can_manage"] else []
 
     return templates.TemplateResponse(
         "document_detail.html",
@@ -1133,6 +1592,9 @@ def document_detail(
             "versions": versions,
             "categories": category_options,
             "pending_request_count": pending_request_count,
+            "share_links": share_links,
+            "share_link_status_label": share_link_status_label,
+            "now": now_iso(),
             "action_download": ACTION_DOWNLOAD,
             "action_upload_version": ACTION_UPLOAD_VERSION,
             "max_upload_mb": MAX_UPLOAD_MB,
@@ -1211,6 +1673,7 @@ def update_document_metadata(
             (cleaned_title, parse_optional_int(category_id), now_iso(), document_id),
         )
         conn.commit()
+    sync_document_index(document_id)
     return RedirectResponse(url=f"/documents/{document_id}", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -1225,10 +1688,10 @@ def delete_document(
         if not document["can_manage"]:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只能删除自己上传的文件")
         document_title = document["title"]
-        conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+        deleted_count = soft_delete_documents_by_ids(conn, [document_id], now_iso())
         conn.commit()
 
-    remove_document_files(UPLOAD_DIR, document_id)
+    remove_document_from_index(document_id)
     log_audit_action(request, user, "delete_document", f"document_id={document_id}; title={document_title}")
     return RedirectResponse(url="/dashboard", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -1285,6 +1748,7 @@ def upload_new_version(
         )
         conn.commit()
 
+    sync_document_index(document_id)
     return RedirectResponse(url=f"/documents/{document_id}", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -1337,3 +1801,182 @@ def download_version(
         if not document["can_download"]:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="请先申请文件下载权限")
         return version_file_response(conn, document_id, version_id)
+
+
+@app.post("/documents/{document_id}/shares")
+def create_document_share(
+    request: Request,
+    document_id: int,
+    password: str = Form(""),
+    validity: str = Form(""),
+    allow_download: str = Form("0"),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> RedirectResponse:
+    allow = allow_download == "1"
+    with get_db() as conn:
+        document = get_document_or_404(conn, document_id)
+        try:
+            token = create_document_share_link(conn, user, document, password, validity, allow, now_iso())
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+        except ValueError as exc:
+            return RedirectResponse(
+                url=local_url_with_message(f"/documents/{document_id}", error=str(exc)),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        conn.commit()
+
+    log_audit_action(
+        request,
+        user,
+        "create_share_link",
+        (
+            f"document_id={document_id}; allow_download={int(allow)}; "
+            f"validity={validity.strip() or 'permanent'}; has_password={int(bool(password))}"
+        ),
+    )
+    return RedirectResponse(
+        url=local_url_with_message(f"/documents/{document_id}", success=f"分享链接已创建：/share/{token}"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@app.post("/shares/{share_id}/revoke")
+def revoke_share(
+    request: Request,
+    share_id: int,
+    return_to: str = Form("/dashboard"),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> RedirectResponse:
+    with get_db() as conn:
+        try:
+            share = revoke_document_share_link(conn, share_id, user, now_iso())
+        except PermissionError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+        except ValueError as exc:
+            return RedirectResponse(
+                url=local_url_with_message(return_to, error=str(exc)),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        conn.commit()
+
+    log_audit_action(request, user, "revoke_share_link", f"share_id={share_id}; document_id={share['document_id']}")
+    return RedirectResponse(
+        url=local_url_with_message(return_to, success="分享链接已撤销"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+SHARE_COOKIE_PREFIX = "share_access_"
+
+
+def resolve_public_share(conn: sqlite3.Connection, token: str) -> sqlite3.Row:
+    share = get_active_share_link(conn, token, now_iso())
+    if not share:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分享链接不存在或已失效")
+    return share
+
+
+def share_access_granted(request: Request, share: sqlite3.Row) -> bool:
+    if not share["password_hash"]:
+        return True
+    cookie_value = request.cookies.get(f"{SHARE_COOKIE_PREFIX}{share['token']}")
+    return bool(cookie_value) and unsign_value(cookie_value) == share["token"]
+
+
+def log_share_access(request: Request, share: sqlite3.Row, detail: str) -> None:
+    log_audit_action(
+        request,
+        {"username": "anonymous"},
+        "share_access",
+        f"document_id={share['document_id']}; share_id={share['id']}; {detail}",
+    )
+
+
+@app.get("/share/{token}")
+def public_share_view(request: Request, token: str) -> Response:
+    with get_db() as conn:
+        share = resolve_public_share(conn, token)
+        if not share_access_granted(request, share):
+            return templates.TemplateResponse(
+                "share_password.html",
+                {"request": request, "token": token, "error": ""},
+            )
+        version = get_current_version(conn, share["document_id"])
+
+    if not version:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分享的文件没有可预览的版本")
+    try:
+        preview = build_preview_context(share["document_id"], version, UPLOAD_DIR)
+    except FileNotFoundError as exc:
+        logger.warning("Stored file is missing for share: share_id=%s file=%s", share["id"], exc)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Stored file is missing") from exc
+
+    log_share_access(request, share, "view")
+    return templates.TemplateResponse(
+        "share_view.html",
+        {
+            "request": request,
+            "share": share,
+            "token": token,
+            "version": version,
+            "preview": preview,
+        },
+    )
+
+
+@app.post("/share/{token}")
+def public_share_password(request: Request, token: str, password: str = Form("")) -> Response:
+    with get_db() as conn:
+        share = resolve_public_share(conn, token)
+
+    if not share["password_hash"]:
+        return RedirectResponse(url=f"/share/{token}", status_code=status.HTTP_303_SEE_OTHER)
+    if not verify_share_password(share["password_hash"], password):
+        log_share_access(request, share, "failed_password")
+        return templates.TemplateResponse(
+            "share_password.html",
+            {"request": request, "token": token, "error": "密码不正确"},
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+    response = RedirectResponse(url=f"/share/{token}", status_code=status.HTTP_303_SEE_OTHER)
+    response.set_cookie(
+        f"{SHARE_COOKIE_PREFIX}{token}",
+        sign_value(token),
+        httponly=True,
+        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true",
+        samesite="lax",
+        max_age=60 * 60,
+    )
+    return response
+
+
+def shared_version_response(request: Request, token: str, disposition: str) -> FileResponse:
+    with get_db() as conn:
+        share = resolve_public_share(conn, token)
+        if not share_access_granted(request, share):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分享链接不存在或已失效")
+        if disposition == "attachment" and not share["allow_download"]:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="该分享链接不允许下载")
+        version = get_current_version(conn, share["document_id"])
+
+    if not version:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="分享的文件没有可下载的版本")
+    if disposition == "attachment":
+        log_audit_action(
+            request,
+            {"username": "anonymous"},
+            "share_download",
+            f"document_id={share['document_id']}; share_id={share['id']}",
+        )
+    return version_row_file_response(share["document_id"], version, disposition)
+
+
+@app.get("/share/{token}/file")
+def public_share_file(request: Request, token: str) -> FileResponse:
+    return shared_version_response(request, token, "inline")
+
+
+@app.get("/share/{token}/download")
+def public_share_download(request: Request, token: str) -> FileResponse:
+    return shared_version_response(request, token, "attachment")

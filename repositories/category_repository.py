@@ -53,7 +53,7 @@ def get_category_depth(conn: sqlite3.Connection, category_id: int) -> int | None
 
 def count_documents_in_category(conn: sqlite3.Connection, category_id: int) -> int:
     row = conn.execute(
-        "SELECT COUNT(*) AS total FROM documents WHERE category_id = ?",
+        "SELECT COUNT(*) AS total FROM documents WHERE category_id = ? AND deleted_at IS NULL",
         (category_id,),
     ).fetchone()
     return int(row["total"])

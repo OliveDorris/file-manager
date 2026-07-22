@@ -91,7 +91,7 @@ def test_login_page_loads(tmp_path, monkeypatch):
     assert "登录" in response.text
 
 
-def test_delete_document_removes_database_rows_and_files(tmp_path, monkeypatch):
+def test_delete_document_moves_document_to_recycle_bin(tmp_path, monkeypatch):
     configure_temp_app(tmp_path, monkeypatch)
 
     document_dir = app.UPLOAD_DIR / "1"
@@ -128,14 +128,17 @@ def test_delete_document_removes_database_rows_and_files(tmp_path, monkeypatch):
     response = client.post(f"/documents/{document_id}/delete", follow_redirects=False)
 
     assert response.status_code == 303
-    assert not document_dir.exists()
+    assert document_dir.exists()
 
     with app.get_db() as conn:
-        document_count = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        deleted_document = conn.execute(
+            "SELECT deleted_at FROM documents WHERE id = ?",
+            (document_id,),
+        ).fetchone()
         version_count = conn.execute("SELECT COUNT(*) FROM document_versions").fetchone()[0]
 
-    assert document_count == 0
-    assert version_count == 0
+    assert deleted_document["deleted_at"] is not None
+    assert version_count == 1
 
 
 def test_category_delete_is_blocked_when_category_has_documents(tmp_path, monkeypatch):
@@ -197,7 +200,7 @@ def test_empty_category_can_be_deleted(tmp_path, monkeypatch):
     assert category_count == 0
 
 
-def test_batch_delete_removes_selected_documents_and_files(tmp_path, monkeypatch):
+def test_batch_delete_moves_selected_documents_to_recycle_bin(tmp_path, monkeypatch):
     configure_temp_app(tmp_path, monkeypatch)
     user = admin_user()
     first_id = insert_document("First", user["id"], filename="first.txt")
@@ -217,17 +220,17 @@ def test_batch_delete_removes_selected_documents_and_files(tmp_path, monkeypatch
     )
 
     assert response.status_code == 303
-    assert not (app.UPLOAD_DIR / str(first_id)).exists()
-    assert not (app.UPLOAD_DIR / str(second_id)).exists()
+    assert (app.UPLOAD_DIR / str(first_id)).exists()
+    assert (app.UPLOAD_DIR / str(second_id)).exists()
     assert (app.UPLOAD_DIR / str(third_id)).exists()
 
     with app.get_db() as conn:
-        remaining_ids = {
-            row["id"]
-            for row in conn.execute("SELECT id FROM documents ORDER BY id").fetchall()
-        }
+        rows = conn.execute("SELECT id, deleted_at FROM documents ORDER BY id").fetchall()
 
-    assert remaining_ids == {third_id}
+    deleted_map = {row["id"]: row["deleted_at"] for row in rows}
+    assert deleted_map[first_id] is not None
+    assert deleted_map[second_id] is not None
+    assert deleted_map[third_id] is None
 
 
 def test_batch_download_returns_zip_for_selected_documents(tmp_path, monkeypatch):

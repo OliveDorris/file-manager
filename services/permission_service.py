@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from repositories.access_request_repository import (
@@ -8,6 +9,8 @@ from repositories.access_request_repository import (
     create_access_request,
     get_access_request,
     get_access_status_map,
+    has_active_grant,
+    revoke_access_request,
     update_access_request_status,
 )
 
@@ -19,6 +22,31 @@ ACCESS_ACTION_LABELS = {
     ACTION_DOWNLOAD: "下载和预览",
     ACTION_UPLOAD_VERSION: "覆盖新版本",
 }
+ACCESS_STATUS_LABELS = {
+    "pending": "待审批",
+    "approved": "已通过",
+    "rejected": "已拒绝",
+    "revoked": "已撤销",
+}
+VALID_ACCESS_STATUSES = set(ACCESS_STATUS_LABELS)
+
+
+def current_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def parse_validity_days(value: str) -> int | None:
+    """审批有效期：空为永久，否则为大于 0 的天数。"""
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    try:
+        days = int(cleaned)
+    except ValueError as exc:
+        raise ValueError("有效期无效") from exc
+    if days <= 0:
+        raise ValueError("有效期无效")
+    return days
 
 
 def _record_value(record: Mapping[str, Any] | sqlite3.Row, key: str) -> Any:
@@ -52,7 +80,7 @@ def build_document_access_flags(
     status_map = (
         {}
         if is_admin(user)
-        else get_access_status_map(conn, int(user["id"]), document_ids)
+        else get_access_status_map(conn, int(user["id"]), document_ids, current_iso())
     )
     result: list[dict[str, Any]] = []
 
@@ -104,7 +132,7 @@ def submit_access_request(
 
     requester_id = int(user["id"])
     document_id = int(_record_value(document, "id"))
-    if access_request_exists(conn, requester_id, document_id, action, "approved"):
+    if has_active_grant(conn, requester_id, document_id, action, current_iso()):
         return None, "申请已通过，可以继续操作该文件"
     if access_request_exists(conn, requester_id, document_id, action, "pending"):
         return None, "申请已提交，请等待管理员处理"
@@ -155,6 +183,7 @@ def review_access_request(
     reviewer_id: int,
     decision: str,
     reviewed_at: str,
+    expires_at: str | None = None,
 ) -> sqlite3.Row:
     if decision not in {"approved", "rejected"}:
         raise ValueError("审批结果无效")
@@ -163,10 +192,39 @@ def review_access_request(
         raise ValueError("申请不存在")
     if access_request["status"] != "pending":
         raise ValueError("该申请已经处理")
-    if not update_access_request_status(conn, request_id, decision, reviewer_id, reviewed_at):
+    if decision != "approved":
+        expires_at = None
+    if not update_access_request_status(conn, request_id, decision, reviewer_id, reviewed_at, expires_at):
         raise ValueError("该申请已经处理")
+    return access_request
+
+
+def revoke_access_request_grant(
+    conn: sqlite3.Connection,
+    request_id: int,
+    user: Mapping[str, Any],
+    reviewed_at: str,
+) -> sqlite3.Row:
+    """撤销已授予的权限：管理员或文件所有者可操作。"""
+    access_request = get_access_request(conn, request_id)
+    if not access_request:
+        raise ValueError("申请不存在")
+    if not is_admin(user) and int(access_request["document_owner_id"]) != int(user["id"]):
+        raise PermissionError("没有权限撤销该授权")
+    if access_request["status"] != "approved":
+        raise ValueError("该授权已失效，无需撤销")
+    if not revoke_access_request(conn, request_id, int(user["id"]), reviewed_at):
+        raise ValueError("该授权已失效，无需撤销")
     return access_request
 
 
 def access_action_label(action: str) -> str:
     return ACCESS_ACTION_LABELS.get(action, action)
+
+
+def access_status_label(status: str) -> str:
+    return ACCESS_STATUS_LABELS.get(status, status)
+
+
+def is_grant_expired(expires_at: Any, now: str) -> bool:
+    return bool(expires_at) and str(expires_at) <= now

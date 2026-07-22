@@ -83,6 +83,7 @@
         <p class="eyebrow">Documents</p>
         <h1>文件列表</h1>
       </div>
+      <a class="button-link secondary-button" href="/recycle-bin">回收站</a>
       <form method="get" action="/dashboard" class="search-form">
         {% if active_category_id %}
           <input type="hidden" name="category_id" value="{{ active_category_id }}">
@@ -166,7 +167,16 @@
                     aria-label="选择 {{ document.title }}"
                   >
                 </td>
-                <td><a href="/documents/{{ document.id }}">{{ document.title }}</a></td>
+                <td>
+                  <a href="/documents/{{ document.id }}">{{ document.title }}</a>
+                  {% set search_context = search_contexts.get(document.id) %}
+                  {% if search_context %}
+                    <div class="muted search-hit-label">{{ "标题命中" if search_context.hit == "title" else "内容命中" }}</div>
+                    {% if search_context.snippet %}
+                      <div class="muted search-snippet">{{ search_context.snippet }}</div>
+                    {% endif %}
+                  {% endif %}
+                </td>
                 <td>{{ document.category_name or "未分类" }}</td>
                 <td>v{{ document.version_number or 0 }}</td>
                 <td>{{ document.original_filename or "-" }}</td>

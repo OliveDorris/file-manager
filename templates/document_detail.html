@@ -92,6 +92,73 @@
         </tbody>
       </table>
     </section>
+
+    {% if document.can_manage %}
+      <section class="table-wrap">
+        <h2>分享链接</h2>
+        <form method="post" action="/documents/{{ document.id }}/shares" class="upload-form">
+          <label>
+            <span>访问密码（可空）</span>
+            <input type="text" name="password" autocomplete="off" placeholder="不填则免密码访问">
+          </label>
+          <label>
+            <span>有效期</span>
+            <select name="validity">
+              <option value="">永久</option>
+              <option value="1">1 天</option>
+              <option value="7">7 天</option>
+              <option value="30">30 天</option>
+            </select>
+          </label>
+          <label>
+            <span>下载权限</span>
+            <select name="allow_download">
+              <option value="0">仅预览</option>
+              <option value="1">允许下载</option>
+            </select>
+          </label>
+          <button type="submit">创建分享链接</button>
+        </form>
+        <table>
+          <thead>
+            <tr>
+              <th>链接</th>
+              <th>密码</th>
+              <th>有效期至</th>
+              <th>权限</th>
+              <th>状态</th>
+              <th>创建人</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for share in share_links %}
+              <tr>
+                <td>/share/{{ share.token }}</td>
+                <td>{{ "有" if share.password_hash else "无" }}</td>
+                <td>{{ share.expires_at[:19].replace("T", " ") if share.expires_at else "永久" }}</td>
+                <td>{{ "允许下载" if share.allow_download else "仅预览" }}</td>
+                <td>{{ share_link_status_label(share, now) }}</td>
+                <td>{{ share.creator_name or "-" }}</td>
+                <td class="actions">
+                  {% if not share.revoked_at and (share.created_by == user.id or user.is_admin) %}
+                    <form method="post" action="/shares/{{ share.id }}/revoke" class="inline-form"
+                          onsubmit="return confirm('撤销后该分享链接立即失效，确认继续？');">
+                      <input type="hidden" name="return_to" value="/documents/{{ document.id }}">
+                      <button type="submit" class="small-button danger-button">撤销</button>
+                    </form>
+                  {% endif %}
+                </td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="7" class="empty">暂无分享链接</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+    {% endif %}
   </div>
 
   <aside class="side-panel">

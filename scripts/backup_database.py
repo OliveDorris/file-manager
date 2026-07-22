@@ -4,9 +4,14 @@ import argparse
 import logging
 import os
 import sqlite3
+import sys
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from services.backup_status_service import STATUS_KIND_DATABASE, now_iso, record_backup_status
 
 
 logger = logging.getLogger("file_manager.backup")
@@ -100,11 +105,35 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     args = build_parser().parse_args()
+    status_path = Path(os.getenv("BACKUP_STATUS_FILE", str(args.database.parent / "backup_status.json")))
+    started_at = now_iso()
     try:
         backup_path = backup_database(args.database, args.output_dir, args.keep)
     except (FileNotFoundError, OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
+        try:
+            record_backup_status(
+                status_path,
+                STATUS_KIND_DATABASE,
+                False,
+                error=str(exc),
+                started_at=started_at,
+                finished_at=now_iso(),
+            )
+        except OSError as status_exc:
+            logger.warning("备份状态记录失败：%s", status_exc)
         logger.error("%s", exc)
         return 1
+    try:
+        record_backup_status(
+            status_path,
+            STATUS_KIND_DATABASE,
+            True,
+            artifact=str(backup_path),
+            started_at=started_at,
+            finished_at=now_iso(),
+        )
+    except OSError as status_exc:
+        logger.warning("备份状态记录失败：%s", status_exc)
     print(backup_path)
     return 0
 
