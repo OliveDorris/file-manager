@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% set title = "审计日志 - 文件管理系统" %}
+{% block content %}
+<section class="account-layout">
+  <div class="section-head">
+    <div>
+      <p class="eyebrow">Audit</p>
+      <h1>审计日志</h1>
+      <p class="muted">重要操作记录，仅管理员可见。</p>
+    </div>
+    <a class="button-link secondary-button" href="/account">返回用户信息</a>
+  </div>
+
+  <form method="get" action="/admin/audit-logs" class="search-form audit-filter-form">
+    <label>
+      <span class="muted">用户</span>
+      <input type="text" name="user" value="{{ filters.user }}" maxlength="50" placeholder="用户名包含">
+    </label>
+    <label>
+      <span class="muted">操作类型</span>
+      <select name="action">
+        <option value="">全部操作</option>
+        {% for action_option in action_options %}
+          <option value="{{ action_option }}" {% if filters.action == action_option %}selected{% endif %}>{{ action_option }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span class="muted">开始日期</span>
+      <input type="date" name="start" value="{{ filters.start }}">
+    </label>
+    <label>
+      <span class="muted">结束日期</span>
+      <input type="date" name="end" value="{{ filters.end }}">
+    </label>
+    <button type="submit" class="small-button">筛选</button>
+  </form>
+
+  <section class="table-wrap account-table">
+    <table>
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th>用户</th>
+          <th>IP</th>
+          <th>操作</th>
+          <th>详情</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for log in audit_logs %}
+          <tr>
+            <td>{{ log.created_at[:19].replace("T", " ") }}</td>
+            <td>{{ log.username }}</td>
+            <td>{{ log.ip }}</td>
+            <td>{{ log.action }}</td>
+            <td>{{ log.detail }}</td>
+          </tr>
+        {% else %}
+          <tr>
+            <td colspan="5" class="empty">暂无审计日志</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="pagination">
+      <span>共 {{ pagination.total_count }} 条，每页最多 {{ pagination.page_size }} 条</span>
+      <div class="pagination-controls">
+        {% if pagination.previous_url %}
+          <a href="{{ pagination.previous_url }}">上一页</a>
+        {% else %}
+          <span class="disabled">上一页</span>
+        {% endif %}
+        <strong>第 {{ pagination.page }} / {{ pagination.total_pages }} 页</strong>
+        {% if pagination.next_url %}
+          <a href="{{ pagination.next_url }}">下一页</a>
+        {% else %}
+          <span class="disabled">下一页</span>
+        {% endif %}
+      </div>
+    </div>
+  </section>
+</section>
+{% endblock %}

@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% set title = "回收站 - 文件管理系统" %}
+{% block content %}
+<section class="account-layout">
+  {% if error %}
+    <div class="alert">{{ error }}</div>
+  {% endif %}
+  {% if success %}
+    <div class="alert success-alert">{{ success }}</div>
+  {% endif %}
+
+  <div class="section-head">
+    <div>
+      <p class="eyebrow">Recycle Bin</p>
+      <h1>回收站</h1>
+      <p class="muted">{{ "全部用户删除的文件" if user.is_admin else "我删除的文件" }}，可恢复或彻底删除。</p>
+    </div>
+    <a class="button-link secondary-button" href="/dashboard">返回文件列表</a>
+  </div>
+
+  <section class="table-wrap account-table">
+    <table>
+      <thead>
+        <tr>
+          <th>标题</th>
+          <th>分类</th>
+          <th>上传者</th>
+          <th>删除时间</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for document in documents %}
+          <tr>
+            <td>{{ document.title }}</td>
+            <td>{{ document.category_name or "未分类" }}</td>
+            <td>{{ document.owner_name }}</td>
+            <td>{{ document.deleted_at[:19].replace("T", " ") }}</td>
+            <td class="actions">
+              <form method="post" action="/documents/{{ document.id }}/restore" class="inline-form">
+                <button type="submit" class="small-button">恢复</button>
+              </form>
+              <form method="post" action="/documents/{{ document.id }}/purge" class="inline-form"
+                    onsubmit="return confirm('彻底删除后无法恢复，确认继续？');">
+                <button type="submit" class="small-button danger-button">彻底删除</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr>
+            <td colspan="5" class="empty">回收站为空</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if documents %}
+      <div class="button-row">
+        <form method="post" action="/recycle-bin/clear"
+              onsubmit="return confirm('将彻底删除回收站中的全部文件，确认继续？');">
+          <button type="submit" class="danger-button">清空回收站</button>
+        </form>
+      </div>
+    {% endif %}
+  </section>
+</section>
+{% endblock %}

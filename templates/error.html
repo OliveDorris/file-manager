@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% set title = (status_code ~ " - 文件管理系统") if status_code else "错误 - 文件管理系统" %}
+{% block content %}
+<section class="error-layout">
+  <div class="section-head">
+    <div>
+      <p class="eyebrow">Error</p>
+      <h1>{{ status_code }}</h1>
+      <p class="muted">{{ message }}</p>
+    </div>
+  </div>
+  <div class="button-row">
+    <a class="button-link secondary-button" href="/dashboard">返回文件列表</a>
+    <a class="button-link secondary-button" href="/account">返回用户信息</a>
+  </div>
+</section>
+{% endblock %}

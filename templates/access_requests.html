@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% set title = "审批历史 - 文件管理系统" %}
+{% block content %}
+<section class="account-layout">
+  <div class="section-head">
+    <div>
+      <p class="eyebrow">Access Requests</p>
+      <h1>审批历史</h1>
+      <p class="muted">{{ "全部文件操作申请记录" if user.is_admin else "我提交的申请和我文件的授权记录" }}。</p>
+    </div>
+    <a class="button-link secondary-button" href="/account">返回用户信息</a>
+  </div>
+
+  <form method="get" action="/access-requests" class="search-form audit-filter-form">
+    {% if user.is_admin %}
+      <label>
+        <span class="muted">申请人</span>
+        <input type="text" name="user" value="{{ filters.user }}" maxlength="50" placeholder="用户名包含">
+      </label>
+    {% endif %}
+    <label>
+      <span class="muted">状态</span>
+      <select name="status">
+        <option value="">全部状态</option>
+        {% for status_option in ["pending", "approved", "rejected", "revoked"] %}
+          <option value="{{ status_option }}" {% if filters.status == status_option %}selected{% endif %}>{{ access_status_label(status_option) }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit" class="small-button">筛选</button>
+  </form>
+
+  <section class="table-wrap account-table">
+    <table>
+      <thead>
+        <tr>
+          <th>申请人</th>
+          <th>文件</th>
+          <th>申请操作</th>
+          <th>状态</th>
+          <th>有效期至</th>
+          <th>申请时间</th>
+          <th>审批时间</th>
+          <th>审批人</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for access_request in access_requests %}
+          <tr>
+            <td>{{ access_request.requester_name }}</td>
+            <td>{{ access_request.document_title }}</td>
+            <td>{{ access_action_label(access_request.action) }}</td>
+            <td>
+              {% if access_request.status == "approved" and is_grant_expired(access_request.expires_at, now) %}
+                已过期
+              {% else %}
+                {{ access_status_label(access_request.status) }}
+              {% endif %}
+            </td>
+            <td>{{ access_request.expires_at[:19].replace("T", " ") if access_request.expires_at else "永久" }}</td>
+            <td>{{ access_request.created_at[:19].replace("T", " ") }}</td>
+            <td>{{ access_request.reviewed_at[:19].replace("T", " ") if access_request.reviewed_at else "-" }}</td>
+            <td>{{ access_request.reviewer_name or "-" }}</td>
+            <td class="actions">
+              {% if access_request.status == "approved" and (user.is_admin or access_request.document_owner_id == user.id) %}
+                <form method="post" action="/access-requests/{{ access_request.id }}/revoke" class="inline-form"
+                      onsubmit="return confirm('撤销后该用户将立即失去对应权限，确认继续？');">
+                  <button type="submit" class="small-button danger-button">撤销权限</button>
+                </form>
+              {% endif %}
+            </td>
+          </tr>
+        {% else %}
+          <tr>
+            <td colspan="9" class="empty">暂无审批记录</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="pagination">
+      <span>共 {{ pagination.total_count }} 条，每页最多 {{ pagination.page_size }} 条</span>
+      <div class="pagination-controls">
+        {% if pagination.previous_url %}
+          <a href="{{ pagination.previous_url }}">上一页</a>
+        {% else %}
+          <span class="disabled">上一页</span>
+        {% endif %}
+        <strong>第 {{ pagination.page }} / {{ pagination.total_pages }} 页</strong>
+        {% if pagination.next_url %}
+          <a href="{{ pagination.next_url }}">下一页</a>
+        {% else %}
+          <span class="disabled">下一页</span>
+        {% endif %}
+      </div>
+    </div>
+  </section>
+</section>
+{% endblock %}
