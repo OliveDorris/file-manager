@@ -145,6 +145,18 @@ audit_logger = logging.getLogger("file_manager.audit")
 
 app = FastAPI(title="File Manager System")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+
+def _static_version() -> str:
+    """Cache-busting token for static assets, based on styles.css mtime."""
+    try:
+        return str(int((BASE_DIR / "static" / "styles.css").stat().st_mtime))
+    except OSError:
+        logger.exception("无法读取 styles.css 修改时间，静态资源版本号使用固定值")
+        return "1"
+
+
+templates.env.globals["static_version"] = _static_version()
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 
